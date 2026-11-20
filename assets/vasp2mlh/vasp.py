@@ -74,11 +74,13 @@ def split_mesh(meta, optional):
     meta["wave_indices"] = np.flatnonzero(training)
     meta["wave_nk"] = len(training)
     if not np.all(training):
-        meta["holdout"] = dict(
+        zero = dict(
             kpoints=meta["kpoints"][~training],
             eig=meta["eig"][:, ~training],
             source="zero-weight",
+            wave_indices=np.flatnonzero(~training),
         )
+        meta["zero_weight"] = meta["holdout"] = zero
         meta["kpoints"] = meta["kpoints"][training]
         meta["eig"] = meta["eig"][:, training]
         meta["weights"] = weights[training]

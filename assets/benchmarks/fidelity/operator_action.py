@@ -8,7 +8,7 @@ import h5py
 import numpy as np
 from scipy.linalg import eigvalsh
 
-from vasp2mlh.band_release import independent_points, window_mask
+from vasp2mlh.band_release import check_source, independent_points, window_mask
 
 from vasp2mlh.basis import read_potcar
 from vasp2mlh.calibrate import metric_factors
@@ -16,29 +16,49 @@ from vasp2mlh.model import adjoint, ao_and_metric
 from vasp2mlh.pipeline import file_sha256
 from vasp2mlh.realspace import matrices_k, structure
 from vasp2mlh.registry import read_shells
-from vasp2mlh.vasp import Wavecar, metadata, plane_waves
+from vasp2mlh.vasp import Wavecar, is_hybrid, metadata, plane_waves
 
 
-def audit(run, models, energy_window=None):
+def reference_records(meta, wave):
+    if is_hybrid(meta):
+        holdout = meta.get("zero_weight")
+        if holdout is None:
+            raise ValueError(
+                "A scalar hybrid action check requires independent zero-weight WAVECAR records in the same SCF"
+            )
+        if wave.nk != meta["wave_nk"]:
+            raise ValueError("Different WAVECAR and XML k-point counts")
+        return holdout, holdout["wave_indices"]
+    if meta["icharg"] != 11 or wave.nk != len(meta["kpoints"]):
+        raise ValueError("Expected a matching scalar fixed-density WAVECAR and XML")
+    return meta, np.arange(wave.nk)
+
+
+def audit(run, models, energy_window=None, band_range=None):
     run = Path(run)
     ref = metadata(run / "vasprun.xml")
     wave = Wavecar(run / "WAVECAR")
     pots = read_potcar(run / "POTCAR")
     n = int(ref["nelect"] / 2)
-    edge = slice(n - 2, n + 2)
+    if band_range is None:
+        band_range = (n - 1, n + 2) if energy_window is None else None
+    if band_range is not None and (
+        energy_window is not None or not 1 <= band_range[0] <= band_range[1] <= wave.nb
+    ):
+        raise ValueError("Choose a valid 1-based band range or an energy window")
     if energy_window is not None and (
         not np.isfinite(energy_window).all() or energy_window[0] >= energy_window[1]
     ):
         raise ValueError("Energy window must have finite, increasing bounds")
-    if (
-        ref["spinor"]
-        or ref["icharg"] != 11
-        or wave.ns != 1
-        or (energy_window is None and (n < 2 or n + 2 > wave.nb))
-    ):
-        raise ValueError(
-            "Expected a fixed-density scalar reference with a four-band edge"
-        )
+    if ref["spinor"] or wave.ns != 1:
+        raise ValueError("Operator action currently requires a scalar reference")
+    spectral = is_hybrid(ref)
+    if spectral:
+        check_source(ref, run)
+    samples, records = reference_records(ref, wave)
+    pot_hash = file_sha256(run / "POTCAR")
+    reference_hash = file_sha256(run / ("WAVECAR" if spectral else "CHGCAR"))
+    xml_hash = file_sha256(run / "vasprun.xml") if spectral else None
     results = {}
     for name in models:
         with h5py.File(name) as f:
@@ -54,15 +74,23 @@ def audit(run, models, energy_window=None):
                     a.positions, ref["atoms"].positions, rtol=0, atol=1e-7
                 )
                 or not np.allclose(a.cell, wave.cell, rtol=0, atol=1e-7)
-                or f.attrs["potcar_sha256"] != file_sha256(run / "POTCAR")
-                or f.attrs["charge_density_sha256"] != file_sha256(run / "CHGCAR")
+                or f.attrs["potcar_sha256"] != pot_hash
             ):
-                raise ValueError("Geometry, metric, PAW or fixed density differs")
+                raise ValueError("Geometry, metric or PAW differs")
+            if spectral:
+                provenance = json.loads(f["source_validation"].attrs["report"])
+                if (
+                    provenance["source_xml_sha256"] != xml_hash
+                    or provenance["input_sha256"]["WAVECAR"] != reference_hash
+                ):
+                    raise ValueError(
+                        "Hybrid operator action requires the model's exact source XML and WAVECAR"
+                    )
+            elif f.attrs["charge_density_sha256"] != reference_hash:
+                raise ValueError("Fixed reference density differs from model")
             basis = {s: read_shells(g) for s, g in f["basis"].items()}
-            if wave.nk != len(ref["kpoints"]):
-                raise ValueError("Different WAVECAR and XML k-point counts")
-            indices = independent_points(f["k/points"][:], ref["kpoints"])
-            h, s = matrices_k(f, ref["kpoints"][indices])
+            indices = independent_points(f["k/points"][:], samples["kpoints"])
+            h, s = matrices_k(f, samples["kpoints"][indices])
             residual = []
             within = []
             projected_norms, leakage_norms = [], []
@@ -73,21 +101,21 @@ def audit(run, models, energy_window=None):
                 if energy_window is None
                 else np.asarray(energy_window) + f.attrs["fermi_eV"]
             )
-            for i, record in enumerate(indices):
-                k, e, c = wave.read(0, record)
+            for i, point in enumerate(indices):
+                k, e, c = wave.read(0, records[point])
                 if not np.allclose(
-                    k, ref["kpoints"][record], atol=1e-7
-                ) or not np.allclose(e[:, 0], ref["eig"][0, record], atol=1e-4, rtol=0):
+                    k, samples["kpoints"][point], atol=1e-7, rtol=0
+                ) or not np.allclose(
+                    e[:, 0], samples["eig"][0, point], atol=1e-4, rtol=0
+                ):
                     raise ValueError(
                         "Independent eigenpairs differ between XML and WAVECAR"
                     )
-                selected = edge
-                if window is not None:
-                    levels = eigvalsh(h[0, i], s[i])
-                    mask = window_mask(e[:, 0][None], levels[None], None, window)
-                    selected = np.flatnonzero(mask[0])
-                    if not len(selected):
-                        continue
+                levels = eigvalsh(h[0, i], s[i])
+                mask = window_mask(e[:, 0][None], levels[None], band_range, window)
+                selected = np.flatnonzero(mask[0])
+                if not len(selected):
+                    continue
                 scored_points += 1
                 phi, p, d = ao_and_metric(
                     plane_waves(k, wave.cell, wave.encut),
@@ -118,9 +146,11 @@ def audit(run, models, energy_window=None):
                 )
             results[str(name)] = {
                 "kpoints_scored": scored_points,
-                "kpoints_total": wave.nk,
+                "kpoints_total": len(records),
                 "independent_k": len(indices),
                 "states_scored": len(residual),
+                "reference_kind": samples.get("source", "fixed-density"),
+                "band_range_1based": band_range,
                 "energy_window_from_source_fermi_eV": energy_window,
                 "min_subspace_weight": min(weights),
                 "rms_action_eV": float(np.mean(np.square(residual)) ** 0.5),
@@ -141,7 +171,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("run")
     parser.add_argument("models", nargs="+")
-    parser.add_argument(
+    target = parser.add_mutually_exclusive_group()
+    target.add_argument(
+        "--bands",
+        type=int,
+        nargs=2,
+        help="inclusive ordered band indices, starting at 1",
+    )
+    target.add_argument(
         "--energy-window",
         type=float,
         nargs=2,
@@ -149,4 +186,8 @@ if __name__ == "__main__":
         help="relative to the model source Fermi energy, eV",
     )
     args = parser.parse_args()
-    print(json.dumps(audit(args.run, args.models, args.energy_window), indent=2))
+    print(
+        json.dumps(
+            audit(args.run, args.models, args.energy_window, args.bands), indent=2
+        )
+    )
