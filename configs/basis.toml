@@ -1,4 +1,4 @@
-# Run: vasp2mlh_genbasis basis.toml
+# Run: v2h genbasis basis.toml
 # With no argument: ./POTCAR -> ./basis.h5, using the built-in compact element layouts.
 command = "basis-generate"
 [parameters]

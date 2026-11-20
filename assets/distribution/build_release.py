@@ -39,7 +39,7 @@ def main():
             "--noconfirm",
             "--onefile",
             "--name",
-            "vasp2mlh",
+            "v2h",
             "--distpath",
             str(product),
             "--specpath",
@@ -73,8 +73,6 @@ def main():
         entry = work / "launch.py"
         shutil.copyfile(root / "assets/distribution/launch.py", entry)
         subprocess.run([*args, str(entry)], cwd=work, check=True)
-        for alias in ("vasp2mlh_valid", "vasp2mlh_genbasis"):
-            os.link(product / "vasp2mlh", product / alias)
         templates = product / "configs"
         templates.mkdir()
         shutil.copy(package / "compact-defaults-v1.toml", templates)

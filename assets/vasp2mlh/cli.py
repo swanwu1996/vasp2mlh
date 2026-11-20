@@ -18,8 +18,8 @@ from .pipeline import bands, build, validate, output_file
 
 def make_parser():
     parser = argparse.ArgumentParser(
-        prog="vasp2mlh",
-        epilog="Run a JSON/TOML control file with: vasp2mlh path/to/config.toml",
+        prog="v2h",
+        epilog="Run v2h in a directory containing mlh.toml, or pass a JSON/TOML file.",
         description="VASP WAVECAR to PAW-metric AO Hamiltonians",
     )
     from . import __version__
@@ -28,13 +28,23 @@ def make_parser():
         "--version", action="version", version=f"%(prog)s {__version__}"
     )
     subs = parser.add_subparsers(dest="command", required=True)
+    genbasis = subs.add_parser(
+        "genbasis", help="generate basis.h5 from POTCAR",
+        description="Read ./POTCAR and write ./basis.h5 using paw-compact-v1. "
+        "Pass a control file to customize the basis or select legacy paw-native-v1.",
+    )
+    genbasis.add_argument("config", nargs="?", metavar="basis.toml")
+    valid = subs.add_parser("valid", help="score a saved model against independent VASP bands")
+    valid.add_argument("config", nargs="?", default="mlh.toml", metavar="mlh.toml")
+    for sub in (genbasis, valid):
+        sub.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     single = subs.add_parser(
         "convert", help="convert one VASP run to MLH training labels"
     )
     single.add_argument("run", help="VASP directory with a full uniform mesh")
     single.add_argument(
         "--reference",
-        help="off-grid reference for vasp2mlh_valid (default: RUN/reference)",
+        help="off-grid reference for v2h valid (default: RUN/reference)",
     )
     single.add_argument(
         "--potential-run", help="matching PAW potential directory (default: RUN)"
@@ -432,57 +442,14 @@ def make_parser():
 
 
 def genbasis_main(argv=None):
-    from . import __version__
-
-    parser = argparse.ArgumentParser(
-        prog="vasp2mlh_genbasis",
-        description="Generate a frozen AO basis from VASP PAW POTCAR files.",
-        epilog="With no argument: read ./POTCAR and write ./basis.h5 using the built-in "
-        "paw-compact-v1 element layouts. Pass basis.toml explicitly for a custom "
-        "layout or method=paw-native-v1 (legacy). Paths resolve from that file. "
-        "A successful run replaces its output file.",
-    )
-    parser.add_argument(
-        "--version", action="version", version=f"%(prog)s {__version__}"
-    )
-    parser.add_argument(
-        "config",
-        metavar="basis.toml",
-        nargs="?",
-        help="optional basis-generation control file",
-    )
-    config = parser.parse_args(argv).config
-    if config is None:
-        return run_cli(
-            ["basis-generate", "basis.h5", "--potcar", "POTCAR"], parser.prog
-        )
-    if Path(config).suffix.lower() not in (".json", ".toml"):
-        parser.error("Supply a TOML or JSON basis configuration")
-    return run_cli([config], parser.prog)
+    return main(["genbasis", *(sys.argv[1:] if argv is None else argv)])
 
 
 def valid_main(argv=None):
-    from . import __version__
-
-    parser = argparse.ArgumentParser(
-        prog="vasp2mlh_valid",
-        description="Check an existing sparse model against independent VASP bands",
-    )
-    parser.add_argument(
-        "--version", action="version", version=f"%(prog)s {__version__}"
-    )
-    parser.add_argument("config", help="same conversion TOML or JSON used by vasp2mlh")
-    path = parser.parse_args(argv).config
-    if Path(path).suffix.lower() not in (".json", ".toml"):
-        parser.error("Supply the conversion TOML or JSON")
-    return main([path], validation_only=True)
+    return main(["valid", *(sys.argv[1:] if argv is None else argv)])
 
 
 def main(argv=None, *, validation_only=False):
-    return run_cli(argv, "vasp2mlh_valid" if validation_only else "vasp2mlh")
-
-
-def run_cli(argv, program):
     from contextlib import ExitStack
     from threadpoolctl import threadpool_limits
     from .configuration import (
@@ -494,13 +461,32 @@ def run_cli(argv, program):
 
     parser, commands = make_parser()
     argv = sys.argv[1:] if argv is None else argv
+    if validation_only:
+        argv = ["valid", *argv]
+    if not argv:
+        if Path("mlh.toml").is_file():
+            argv = ["mlh.toml"]
+        elif Path("WAVECAR").is_file():
+            argv = ["convert", "."]
+        else:
+            argv = ["--help"]
+    program = "v2h"
+    if argv[0] in ("genbasis", "valid"):
+        entry = parser.parse_args(argv)
+        program = f"v2h {entry.command}"
+        if entry.config is None:
+            argv = ["basis-generate", "basis.h5", "--potcar", "POTCAR"]
+        elif Path(entry.config).suffix.lower() in (".json", ".toml"):
+            argv = [entry.config]
+        else:
+            commands[entry.command].error("Supply a TOML or JSON control file")
     settings = {}
     try:
         with ExitStack() as stack:
             if len(argv) == 1 and Path(argv[0]).suffix.lower() in (".json", ".toml"):
                 path = Path(argv[0]).resolve()
                 config = load_config(path)
-                if program == "vasp2mlh_genbasis":
+                if program == "v2h genbasis":
                     command = config.get("command", "basis-generate")
                     if command != "basis-generate":
                         raise ValueError("Expected a basis-generate configuration")
@@ -514,7 +500,7 @@ def run_cli(argv, program):
                     }
                 else:
                     command = config.get("command", "convert-batch")
-                if program == "vasp2mlh_valid" and command != "convert":
+                if program == "v2h valid" and command != "convert":
                     raise ValueError(
                         "Expected a single-structure convert configuration"
                     )
@@ -523,6 +509,7 @@ def run_cli(argv, program):
                 else:
                     if (
                         not isinstance(command, str)
+                        or command in ("valid", "genbasis")
                         or command not in commands
                         or config.keys() - {"command", "parameters", "runtime"}
                     ):
@@ -557,11 +544,11 @@ def run_cli(argv, program):
                 if threads < 1:
                     raise ValueError("threads must be a positive integer")
                 stack.enter_context(threadpool_limits(limits=threads))
-            if program == "vasp2mlh_valid":
+            if program == "v2h valid":
                 from .validation import validate_sample
 
                 return validate_sample(args, path)
-            if program == "vasp2mlh_genbasis":
+            if program == "v2h genbasis":
                 if "threads" not in settings:
                     stack.enter_context(threadpool_limits(limits=1))
                 execute(parser, args)

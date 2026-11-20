@@ -20,11 +20,15 @@ from .vasp import metadata
 
 def check_scalar(meta):
     settings = meta["operator_parameters"]
+    if meta["lreal"] not in ("F", ".FALSE."):
+        raise ValueError(
+            f"VASP used LREAL={meta['lreal']}. For scalar reconstruction, rerun "
+            "with LREAL=.FALSE., ISYM=-1 and WRT_POTENTIAL=total paw on a full mesh."
+        )
     if (
         meta["nspin"] != 1
         or meta["spinor"]
         or meta["soc"]
-        or meta["lreal"] not in ("F", ".FALSE.")
         or any(
             settings.get(tag, "F") not in ("F", ".FALSE.", "FALSE")
             for tag in ("LHFCALC", "LDAU", "LUSE_VDW", "LSPIRAL")

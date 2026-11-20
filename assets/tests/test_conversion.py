@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -13,6 +14,28 @@ from vasp2mlh.configuration import load_config
 
 
 class SingleConversionTests(unittest.TestCase):
+    def test_v2h_default_config_and_subcommands(self):
+        with TemporaryDirectory() as folder:
+            previous = Path.cwd()
+            try:
+                os.chdir(folder)
+                Path("WAVECAR").touch()
+                with patch("vasp2mlh.cli.execute") as execute:
+                    main([])
+                    self.assertEqual(execute.call_args.args[1].run, ".")
+                    Path("mlh.toml").write_text('command="convert"\n[parameters]\nrun="mesh"')
+                    main([])
+                    self.assertEqual(execute.call_args.args[1].run, "mesh")
+                with patch("vasp2mlh.validation.validate_sample") as validate:
+                    main(["valid"])
+                    self.assertEqual(validate.call_args.args[0].run, "mesh")
+                    self.assertEqual(validate.call_args.args[1], Path("mlh.toml").resolve())
+                with patch("vasp2mlh.atomic.generate") as generate:
+                    main(["genbasis"])
+                    generate.assert_called_once_with("basis.h5", ["POTCAR"], None, "paw-compact-v1")
+            finally:
+                os.chdir(previous)
+
     def test_empty_wavecar_reports_vasp_setting(self):
         with TemporaryDirectory() as temp:
             run = Path(temp)

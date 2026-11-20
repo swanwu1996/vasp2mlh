@@ -60,6 +60,11 @@ class ScalarOperator:
             )
         self.shape = tuple(int(value(n)) for n in ("NGX", "NGY", "NGZ"))
         with h5py.File(directory / "vaspout.h5") as f:
+            if "results/potential/total" not in f or "results/paw" not in f:
+                raise ValueError(
+                    f"{directory / 'vaspout.h5'} lacks total potential or PAW strengths. "
+                    "Run VASP with WRT_POTENTIAL=total paw."
+                )
             geo = f["results/positions"]
             cell = geo["lattice_vectors"][:] * geo["scale"][()]
             symbols = np.repeat(geo["ion_types"].asstr()[:], geo["number_ion_types"][:])

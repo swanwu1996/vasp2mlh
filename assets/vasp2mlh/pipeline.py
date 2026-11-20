@@ -76,7 +76,7 @@ def build(
         raise ValueError("Unexpected spinor record layout")
     k = meta["kpoints"]
     if not np.allclose(meta["weights"], 1 / w.nk, atol=1e-7, rtol=0):
-        raise ValueError("Fourier transform requires a uniformly weighted full mesh")
+        raise ValueError("Fourier transform requires a uniformly weighted full mesh. Run VASP with ISYM=-1.")
     mesh = mesh if mesh is not None else meta["mesh"]
     if mesh is None:
         raise ValueError("Pass --mesh Nx Ny Nz for an explicit full k list")
