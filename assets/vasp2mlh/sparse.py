@@ -153,7 +153,7 @@ def sparsify(
                 "k/projectability",
             ):
                 src.copy(name, out.require_group("k") if name.startswith("k/") else out)
-            for group in ("calibration", "filter"):
+            for group in ("calibration", "filter", "locality"):
                 if group in src:
                     src.copy(group, out)
             for diagnostic in (

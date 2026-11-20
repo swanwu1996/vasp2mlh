@@ -217,6 +217,18 @@ def label_definition(f):
     ):
         if key in attrs:
             settings[key] = np.asarray(attrs[key]).tolist()
+    if method == "locality_constrained_paw":
+        recipe = json.loads(attrs["locality_recipe"])
+        if not np.isclose(
+            settings.pop("complement_eV") - attrs["fermi_eV"],
+            recipe["prior_offset_eV"],
+            rtol=0,
+            atol=1e-8,
+        ):
+            raise ValueError(
+                "Localized complement energy disagrees with its label recipe"
+            )
+        settings["locality_recipe"] = recipe
     if method in {"hybrid_spectral_ritz", "spinor_spectral_ritz"}:
         settings.pop("complement_eV")
         settings["complement_policy"] = attrs["complement_policy"]

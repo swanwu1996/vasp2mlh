@@ -73,7 +73,7 @@ def read_jobs(manifest, config=None):
         },
         "projection": {"cutoff", "mesh", "complement"},
     }
-    modes["hybrid"] = modes["noncollinear"] = modes["validated"]
+    modes["hybrid"] = modes["noncollinear"] = modes["validated"] | {"completion_method"}
     if (
         not isinstance(mode, str)
         or mode not in modes
@@ -141,6 +141,9 @@ def read_jobs(manifest, config=None):
                     or any(type(v) not in kinds for v in value)
                 ):
                     raise ValueError(f"Invalid {key} array for job {label}")
+            elif key == "completion_method":
+                if value not in ("spectral-ritz", "locality-constrained"):
+                    raise ValueError(f"Unknown hybrid method for job {label}")
             elif key == "relative_pruning":
                 if type(value) is not bool:
                     raise ValueError(f"{key} must be true or false")

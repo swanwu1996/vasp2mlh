@@ -30,15 +30,23 @@ def make_parser():
     )
     subs = parser.add_subparsers(dest="command", required=True)
     genbasis = subs.add_parser(
-        "genbasis", prog="v2h_genbasis", help="generate basis.h5 from POTCAR",
+        "genbasis",
+        prog="v2h_genbasis",
+        help="generate basis.h5 from POTCAR",
         description="Read ./POTCAR and write ./basis.h5 using paw-compact-v1. "
         "Pass a control file to customize the basis or select legacy paw-native-v1.",
     )
     genbasis.add_argument("config", nargs="?", metavar="basis.toml")
-    valid = subs.add_parser("valid", prog="v2h_valid", help="score a saved model against independent VASP bands")
+    valid = subs.add_parser(
+        "valid",
+        prog="v2h_valid",
+        help="score a saved model against independent VASP bands",
+    )
     valid.add_argument("config", nargs="?", default="mlh.toml", metavar="mlh.toml")
     for sub in (genbasis, valid):
-        sub.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+        sub.add_argument(
+            "--version", action="version", version=f"%(prog)s {__version__}"
+        )
     single = subs.add_parser(
         "convert", help="convert one VASP run to MLH training labels"
     )
@@ -182,6 +190,12 @@ def make_parser():
     )
     for operation in (single, release):
         operation.add_argument(
+            "--completion-method",
+            choices=("spectral-ritz", "locality-constrained"),
+            default=None,
+            help="completion of the hybrid or noncollinear Hamiltonian (default: spectral-ritz)",
+        )
+        operation.add_argument(
             "--centre-offset",
             type=float,
             default=6.0,
@@ -243,7 +257,9 @@ def make_parser():
     )
     audit.add_argument("registry")
     audit.add_argument("models", nargs="+")
-    audit.add_argument("--labels", action="store_true", help="require compatible ML training labels")
+    audit.add_argument(
+        "--labels", action="store_true", help="require compatible ML training labels"
+    )
     batch = subs.add_parser(
         "deeph-batch", help="export a checked cohort of DeepH samples"
     )
@@ -623,7 +639,9 @@ def execute(parser, args):
     elif args.command == "basis-check":
         from .registry import audit
 
-        print(json.dumps(audit(args.models, args.registry, labels=args.labels), indent=2))
+        print(
+            json.dumps(audit(args.models, args.registry, labels=args.labels), indent=2)
+        )
     elif args.command == "deeph-batch":
         deeph_batch(args.models, args.output, args.basis_lock)
     elif args.command == "calibrate":
