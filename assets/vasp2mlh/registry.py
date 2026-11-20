@@ -217,6 +217,18 @@ def label_definition(f):
     ):
         if key in attrs:
             settings[key] = np.asarray(attrs[key]).tolist()
+    if method == "locality_constrained_paw":
+        recipe = json.loads(attrs["locality_recipe"])
+        if not np.isclose(
+            settings.pop("complement_eV") - attrs["fermi_eV"],
+            recipe["prior_offset_eV"],
+            rtol=0,
+            atol=1e-8,
+        ):
+            raise ValueError(
+                "Localized complement energy disagrees with its label recipe"
+            )
+        settings["locality_recipe"] = recipe
     if method == "hybrid_spectral_ritz":
         settings.pop("complement_eV")
         settings["complement_policy"] = attrs["complement_policy"]
@@ -288,8 +300,13 @@ def audit(models, registry=None, labels=False):
                             raise ValueError(f"Conflicting XC provenance in {path}")
                         xc = {**recorded, **xc}
                         break
-                if is_hybrid({"operator_parameters": xc}) and not {"HFSCREEN", "AEXX"} <= xc.keys():
-                    raise ValueError(f"Incomplete nonlocal exchange definition in {path}")
+                if (
+                    is_hybrid({"operator_parameters": xc})
+                    and not {"HFSCREEN", "AEXX"} <= xc.keys()
+                ):
+                    raise ValueError(
+                        f"Incomplete nonlocal exchange definition in {path}"
+                    )
                 if xc.get("GGA") in ("LI", "LIBXC") and not xc.get("LIBXC1"):
                     raise ValueError(f"Missing Libxc functional identity in {path}")
                 known_xc.add(json.dumps(xc, sort_keys=True))

@@ -34,7 +34,9 @@ def convert_sample(args):
         require_file(run / name, "Use the matching source calculation.")
     # reconstruct checks the functional-specific operator inputs after parsing the XML.
     registry = Path(args.registry) if args.registry else run / "basis.h5"
-    needs_basis = not args.registry and not registry.exists() and not registry.is_symlink()
+    needs_basis = (
+        not args.registry and not registry.exists() and not registry.is_symlink()
+    )
     if not needs_basis:
         require_file(registry, "Supply a frozen AO registry with --registry.")
 
@@ -66,7 +68,11 @@ def convert_sample(args):
             cutoff=args.cutoff,
             max_rmse=args.max_rmse,
             max_error=args.max_error,
-            centre_offset=args.centre_offset, width=args.width, floor=args.floor, taper=args.taper,
+            completion_method=args.completion_method,
+            centre_offset=args.centre_offset,
+            width=args.width,
+            floor=args.floor,
+            taper=args.taper,
             on_stage=progress.stage,
             on_kpoint=progress.projected,
         )

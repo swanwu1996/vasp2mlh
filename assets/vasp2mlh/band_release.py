@@ -11,6 +11,7 @@ from ase.io import write
 from . import __version__
 from .comparison import periodic_match
 from .filtering import filter_model
+from .locality import locality_model, PRIOR_OFFSET_EV
 from .overlap import overlap
 from .pipeline import bands, build, file_sha256, output_file
 from .registry import fingerprint, inspect_basis, read_registry
@@ -256,6 +257,7 @@ def reconstruct(
     mesh=None,
     potential_run=None,
     relative_pruning=False,
+    completion_method=None,
     centre_offset=6.0,
     width=1.0,
     floor=None,
@@ -309,6 +311,15 @@ def reconstruct(
         raise ValueError(
             "Hybrid projection uses the source WAVECAR; omit potential_run"
         )
+    if completion_method not in (None, "spectral-ritz", "locality-constrained"):
+        raise ValueError(f"Unknown hybrid method {completion_method}")
+    localized = completion_method == "locality-constrained"
+    if completion_method is not None and not hybrid:
+        raise ValueError("Choosing a completion method requires a scalar hybrid source")
+    if localized and (
+        floor is not None or (centre_offset, width, taper) != (6.0, 1.0, 2.0)
+    ):
+        raise ValueError("Ritz filter controls do not apply to localized completion")
     if floor is None:
         floor = 0.0001 if hybrid else 0.005
     xml_hash = file_sha256(run / "vasprun.xml")
@@ -339,7 +350,7 @@ def reconstruct(
         or np.any(src["eig"][0, :, -1] <= abs_window[1])
     ):
         raise ValueError("Source VASP spectrum must extend above the energy window")
-    if hybrid:
+    if hybrid and not localized:
         ceiling = src["efermi"] + centre_offset + 2 * taper
         if np.any(src["eig"][0, :, -1] < ceiling):
             raise ValueError(
@@ -369,7 +380,8 @@ def reconstruct(
             d / "direct.h5",
             mesh=mesh,
             potential_run=None if hybrid else potential,
-            complement=src["efermi"] + centre_offset + 2 * taper + 10.0
+            complement=src["efermi"]
+            + (PRIOR_OFFSET_EV if localized else centre_offset + 2 * taper + 10.0)
             if hybrid
             else 0.0,
             on_kpoint=on_kpoint,
@@ -379,16 +391,25 @@ def reconstruct(
         overlap(d / "geometry.vasp", registry, d / "overlap.h5", order=96)
         if on_stage is not None:
             on_stage("Filter Hamiltonian")
-        filter_model(
-            d / "direct.h5",
-            d / "overlap.h5",
-            d / "filtered.h5",
-            centre_offset,
-            width,
-            floor,
-            taper,
-            spectral_hybrid=hybrid,
-        )
+        if localized:
+            locality_model(
+                d / "direct.h5",
+                d / "overlap.h5",
+                d / "filtered.h5",
+                band_range,
+                energy_window,
+            )
+        else:
+            filter_model(
+                d / "direct.h5",
+                d / "overlap.h5",
+                d / "filtered.h5",
+                centre_offset,
+                width,
+                floor,
+                taper,
+                spectral_hybrid=hybrid,
+            )
         if on_stage is not None:
             on_stage("Sparsify H(R)")
         sparsify(
@@ -459,10 +480,22 @@ def reconstruct(
                         "filter_taper_eV",
                         "filter_ceiling_eV",
                     )
+                    if name in model.attrs
                 },
                 input_sha256=hashes,
             )
-            if hybrid:
+            if localized:
+                del report["filter_parameters"]
+                report["profile"] = "hybrid-locality-reconstruction/1"
+                report["locality_completion"] = dict(
+                    recipe=json.loads(model.attrs["locality_recipe"]),
+                    retained_bands=int(model["locality"].attrs["retained_bands"]),
+                    iterations=int(model["locality"].attrs["iterations"]),
+                    min_retained_subspace_weight=float(
+                        model["locality/min_retained_weight"][:].min()
+                    ),
+                )
+            elif hybrid:
                 report["spectral_completion"] = {
                     "policy": str(model.attrs["complement_policy"]),
                     "complement_eV": float(model.attrs["complement_eV"]),

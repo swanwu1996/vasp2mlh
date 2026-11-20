@@ -73,7 +73,7 @@ def read_jobs(manifest, config=None):
         },
         "projection": {"cutoff", "mesh", "complement"},
     }
-    modes["hybrid"] = modes["validated"]
+    modes["hybrid"] = modes["validated"] | {"completion_method"}
     if (
         not isinstance(mode, str)
         or mode not in modes
@@ -119,7 +119,10 @@ def read_jobs(manifest, config=None):
         options = {**config.get("defaults", {}), **row.get("options", {})}
         if row.keys() - allowed or options.keys() - modes[mode]:
             raise ValueError(f"Unknown field or option for {mode} job {label}")
-        if mode in ("validated", "hybrid") and not options.keys() & {"energy_window", "band_range"}:
+        if mode in ("validated", "hybrid") and not options.keys() & {
+            "energy_window",
+            "band_range",
+        }:
             options["energy_window"] = list(DEFAULT_ENERGY_WINDOW)
         if mode in ("validated", "hybrid") and (
             not {"cutoff", "max_rmse", "max_error"} <= options.keys()
@@ -138,6 +141,9 @@ def read_jobs(manifest, config=None):
                     or any(type(v) not in kinds for v in value)
                 ):
                     raise ValueError(f"Invalid {key} array for job {label}")
+            elif key == "completion_method":
+                if value not in ("spectral-ritz", "locality-constrained"):
+                    raise ValueError(f"Unknown hybrid method for job {label}")
             elif key == "relative_pruning":
                 if type(value) is not bool:
                     raise ValueError(f"{key} must be true or false")
@@ -151,7 +157,11 @@ def read_jobs(manifest, config=None):
             "options": options,
         }
         if mode in ("validated", "hybrid"):
-            job["reference"] = path(row.get("reference", row["run"]) if mode == "hybrid" else row["reference"])
+            job["reference"] = path(
+                row.get("reference", row["run"])
+                if mode == "hybrid"
+                else row["reference"]
+            )
             job["potential_run"] = path(row.get("potential_run", row["run"]))
         jobs.append(job)
     if not jobs:
@@ -267,7 +277,9 @@ def convert(job, output, threads, backend=None):
             )
             with output_file(target) as tmp:
                 if mode in ("validated", "hybrid"):
-                    if (mode == "hybrid") != is_hybrid(metadata(job["run"] / "vasprun.xml")):
+                    if (mode == "hybrid") != is_hybrid(
+                        metadata(job["run"] / "vasprun.xml")
+                    ):
                         raise ValueError("Batch mode disagrees with source functional")
                     report = reconstruct(
                         job["run"],
@@ -334,7 +346,9 @@ def preflight(job):
     src = metadata(run / "vasprun.xml")
     if job["mode"] in ("hybrid", "validated"):
         if (job["mode"] == "hybrid") != is_hybrid(src):
-            raise ValueError("Batch mode must match the source functional: hybrid or validated")
+            raise ValueError(
+                "Batch mode must match the source functional: hybrid or validated"
+            )
         check_source(src, run)
     wave, _ = projection_header(run, src, job["options"].get("mesh"))
     symbols = src["atoms"].get_chemical_symbols()
@@ -356,7 +370,9 @@ def preflight(job):
     return {
         "kpoints": len(src["kpoints"]) if is_hybrid(src) else wave.nk,
         "orbitals": dim,
-        "dense_hs_bytes": 16 * (len(src["kpoints"]) if is_hybrid(src) else wave.nk) * (wave.ns * hdim**2 + dim**2),
+        "dense_hs_bytes": 16
+        * (len(src["kpoints"]) if is_hybrid(src) else wave.nk)
+        * (wave.ns * hdim**2 + dim**2),
     }
 
 
@@ -439,7 +455,14 @@ def run_batch(manifest, output=None, workers=None, threads=None, check_only=None
                 try:
                     details = preflight(job)
                     record({"id": job["id"], "status": "ready", **details})
-                except (OSError, ValueError, KeyError, IndexError, ParseError, AttributeError) as exc:
+                except (
+                    OSError,
+                    ValueError,
+                    KeyError,
+                    IndexError,
+                    ParseError,
+                    AttributeError,
+                ) as exc:
                     record({"id": job["id"], "status": "failed", "error": str(exc)})
         else:
             pool = ProcessPoolExecutor(
