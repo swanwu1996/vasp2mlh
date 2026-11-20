@@ -45,8 +45,8 @@ def convert_sample(args):
         for name in names:
             require_file(directory / name, hint)
     registry = Path(args.registry) if args.registry else run / "basis.h5"
-    native = not args.registry and not registry.exists() and not registry.is_symlink()
-    if not native:
+    needs_basis = not args.registry and not registry.exists() and not registry.is_symlink()
+    if not needs_basis:
         require_file(registry, "Supply a frozen AO registry with --registry.")
 
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -58,7 +58,7 @@ def convert_sample(args):
         progress = ConversionProgress(bar)
         result = Path(staging) / "result"
         result.mkdir()
-        if native:
+        if needs_basis:
             registry = result / "basis.h5"
             generate(registry, [run / "POTCAR"])
         window = args.energy_window

@@ -54,6 +54,8 @@ def main():
             "vasp2mlh._radial",
             "--add-data",
             f"{package / 'viewer.html'}:vasp2mlh",
+            "--add-data",
+            f"{package / 'compact-defaults-v1.toml'}:vasp2mlh",
         ]
         for dep in ("numpy", "scipy", "h5py", "ase", "threadpoolctl"):
             args.extend(("--copy-metadata", dep))
@@ -75,6 +77,7 @@ def main():
             os.link(product / "vasp2mlh", product / alias)
         templates = product / "configs"
         templates.mkdir()
+        shutil.copy(package / "compact-defaults-v1.toml", templates)
         for filename in ("mlh.toml", "validated.toml", "projection.json", "basis.toml", "layout.toml", "bands.toml", "report.json", "deeph.toml"):
             shutil.copyfile(root / "configs" / filename, templates / filename)
         target = dist / (name + ".tar.gz")

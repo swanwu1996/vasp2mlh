@@ -1,0 +1,135 @@
+# paw-compact-v1 default layout. Radii in angstrom, radial shells in s, p, d, f order.
+# The effective radius is bounded by the last tabulated PAW radius.
+# These are starting parameters. Validate the bands in the target material and energy window.
+
+# Period 1
+H = { cutoff_A = 0.8, multiplicities = [2, 1] }
+He = { cutoff_A = 1.0, multiplicities = [2, 1] }
+
+# Period 2
+Li = { cutoff_A = 3.0, multiplicities = [2, 2, 1] }
+Be = { cutoff_A = 3.0, multiplicities = [2, 2, 1] }
+B = { cutoff_A = 3.0, multiplicities = [2, 2, 1] }
+C = { cutoff_A = 3.2, multiplicities = [2, 2, 1] }
+N = { cutoff_A = 3.0, multiplicities = [2, 2, 1] }
+O = { cutoff_A = 3.0, multiplicities = [2, 2, 1] }
+F = { cutoff_A = 2.7, multiplicities = [2, 2, 1] }
+Ne = { cutoff_A = 3.0, multiplicities = [2, 2, 1] }
+
+# Period 3
+Na = { cutoff_A = 3.3, multiplicities = [2, 2, 1] }
+Mg = { cutoff_A = 3.3, multiplicities = [2, 2, 1] }
+Al = { cutoff_A = 3.3, multiplicities = [2, 2, 1] }
+Si = { cutoff_A = 2.5, multiplicities = [2, 2, 1] }
+P = { cutoff_A = 3.3, multiplicities = [2, 2, 1] }
+S = { cutoff_A = 3.4, multiplicities = [2, 2, 1] }
+Cl = { cutoff_A = 3.3, multiplicities = [2, 2, 1] }
+Ar = { cutoff_A = 3.3, multiplicities = [2, 2, 1] }
+
+# Period 4
+K = { cutoff_A = 3.5, multiplicities = [2, 2, 1] }
+Ca = { cutoff_A = 3.5, multiplicities = [2, 2, 1] }
+Sc = { cutoff_A = 3.5, multiplicities = [3, 2, 2] }
+Ti = { cutoff_A = 3.5, multiplicities = [3, 2, 2] }
+V = { cutoff_A = 3.5, multiplicities = [3, 2, 2] }
+Cr = { cutoff_A = 3.5, multiplicities = [3, 2, 2] }
+Mn = { cutoff_A = 3.5, multiplicities = [3, 2, 2] }
+Fe = { cutoff_A = 3.2, multiplicities = [3, 2, 1] }
+Co = { cutoff_A = 3.5, multiplicities = [3, 2, 2] }
+Ni = { cutoff_A = 3.5, multiplicities = [3, 2, 2] }
+Cu = { cutoff_A = 3.5, multiplicities = [3, 2, 2] }
+Zn = { cutoff_A = 3.5, multiplicities = [3, 2, 2] }
+Ga = { cutoff_A = 3.4, multiplicities = [2, 2, 2] }
+Ge = { cutoff_A = 3.5, multiplicities = [2, 2, 1] }
+As = { cutoff_A = 3.5, multiplicities = [2, 2, 1] }
+Se = { cutoff_A = 3.6, multiplicities = [2, 2, 1] }
+Br = { cutoff_A = 3.5, multiplicities = [2, 2, 1] }
+Kr = { cutoff_A = 3.5, multiplicities = [2, 2, 1] }
+
+# Period 5
+Rb = { cutoff_A = 3.6, multiplicities = [2, 2, 1] }
+Sr = { cutoff_A = 3.6, multiplicities = [2, 2, 1] }
+Y = { cutoff_A = 3.6, multiplicities = [3, 2, 2] }
+Zr = { cutoff_A = 3.6, multiplicities = [3, 2, 2] }
+Nb = { cutoff_A = 3.6, multiplicities = [3, 2, 2] }
+Mo = { cutoff_A = 3.6, multiplicities = [3, 2, 2] }
+Tc = { cutoff_A = 3.6, multiplicities = [3, 2, 2] }
+Ru = { cutoff_A = 3.6, multiplicities = [3, 2, 2] }
+Rh = { cutoff_A = 3.6, multiplicities = [3, 2, 2] }
+Pd = { cutoff_A = 3.6, multiplicities = [3, 2, 2] }
+Ag = { cutoff_A = 3.6, multiplicities = [3, 2, 2] }
+Cd = { cutoff_A = 3.6, multiplicities = [3, 2, 2] }
+In = { cutoff_A = 3.6, multiplicities = [2, 2, 1] }
+Sn = { cutoff_A = 3.6, multiplicities = [2, 2, 1] }
+Sb = { cutoff_A = 3.6, multiplicities = [2, 2, 1] }
+Te = { cutoff_A = 3.6, multiplicities = [2, 2, 1] }
+I = { cutoff_A = 3.8, multiplicities = [3, 2, 2, 1] }
+Xe = { cutoff_A = 3.6, multiplicities = [2, 2, 1] }
+
+# Period 6
+Cs = { cutoff_A = 4.4, multiplicities = [3, 2, 2] }
+Ba = { cutoff_A = 4.0, multiplicities = [3, 2, 2] }
+La = { cutoff_A = 3.8, multiplicities = [3, 2, 2, 1] }
+Ce = { cutoff_A = 3.8, multiplicities = [3, 2, 2, 1] }
+Pr = { cutoff_A = 3.8, multiplicities = [3, 2, 2, 1] }
+Nd = { cutoff_A = 3.8, multiplicities = [3, 2, 2, 1] }
+Pm = { cutoff_A = 3.8, multiplicities = [3, 2, 2, 1] }
+Sm = { cutoff_A = 3.8, multiplicities = [3, 2, 2, 1] }
+Eu = { cutoff_A = 3.8, multiplicities = [3, 2, 2, 1] }
+Gd = { cutoff_A = 3.8, multiplicities = [3, 2, 2, 1] }
+Tb = { cutoff_A = 3.8, multiplicities = [3, 2, 2, 1] }
+Dy = { cutoff_A = 3.8, multiplicities = [3, 2, 2, 1] }
+Ho = { cutoff_A = 3.8, multiplicities = [3, 2, 2, 1] }
+Er = { cutoff_A = 3.8, multiplicities = [3, 2, 2, 1] }
+Tm = { cutoff_A = 3.8, multiplicities = [3, 2, 2, 1] }
+Yb = { cutoff_A = 3.8, multiplicities = [3, 2, 2, 1] }
+Lu = { cutoff_A = 3.8, multiplicities = [3, 2, 2, 1] }
+Hf = { cutoff_A = 3.6, multiplicities = [3, 2, 2, 1] }
+Ta = { cutoff_A = 3.8, multiplicities = [3, 2, 2] }
+W = { cutoff_A = 3.6, multiplicities = [3, 2, 2, 1] }
+Re = { cutoff_A = 3.8, multiplicities = [3, 2, 2] }
+Os = { cutoff_A = 3.8, multiplicities = [3, 2, 2] }
+Ir = { cutoff_A = 3.8, multiplicities = [3, 2, 2] }
+Pt = { cutoff_A = 3.8, multiplicities = [3, 2, 2] }
+Au = { cutoff_A = 3.8, multiplicities = [3, 2, 2] }
+Hg = { cutoff_A = 3.8, multiplicities = [3, 2, 2] }
+Tl = { cutoff_A = 3.8, multiplicities = [3, 2, 2, 1] }
+Pb = { cutoff_A = 3.8, multiplicities = [3, 2, 2, 1] }
+Bi = { cutoff_A = 3.8, multiplicities = [3, 2, 2, 1] }
+Po = { cutoff_A = 3.8, multiplicities = [3, 2, 2, 1] }
+At = { cutoff_A = 3.8, multiplicities = [3, 2, 2, 1] }
+Rn = { cutoff_A = 3.8, multiplicities = [3, 2, 2, 1] }
+
+# Period 7
+Fr = { cutoff_A = 3.8, multiplicities = [2, 2, 1] }
+Ra = { cutoff_A = 3.8, multiplicities = [2, 2, 1] }
+Ac = { cutoff_A = 3.8, multiplicities = [3, 2, 2, 1] }
+Th = { cutoff_A = 3.8, multiplicities = [3, 2, 2, 1] }
+Pa = { cutoff_A = 3.8, multiplicities = [3, 2, 2, 1] }
+U = { cutoff_A = 3.8, multiplicities = [3, 2, 2, 1] }
+Np = { cutoff_A = 3.8, multiplicities = [3, 2, 2, 1] }
+Pu = { cutoff_A = 3.8, multiplicities = [3, 2, 2, 1] }
+Am = { cutoff_A = 3.8, multiplicities = [3, 2, 2, 1] }
+Cm = { cutoff_A = 3.8, multiplicities = [3, 2, 2, 1] }
+Bk = { cutoff_A = 3.8, multiplicities = [3, 2, 2, 1] }
+Cf = { cutoff_A = 3.8, multiplicities = [3, 2, 2, 1] }
+Es = { cutoff_A = 3.8, multiplicities = [3, 2, 2, 1] }
+Fm = { cutoff_A = 3.8, multiplicities = [3, 2, 2, 1] }
+Md = { cutoff_A = 3.8, multiplicities = [3, 2, 2, 1] }
+No = { cutoff_A = 3.8, multiplicities = [3, 2, 2, 1] }
+Lr = { cutoff_A = 3.8, multiplicities = [3, 2, 2, 1] }
+Rf = { cutoff_A = 3.8, multiplicities = [3, 2, 2] }
+Db = { cutoff_A = 3.8, multiplicities = [3, 2, 2] }
+Sg = { cutoff_A = 3.8, multiplicities = [3, 2, 2] }
+Bh = { cutoff_A = 3.8, multiplicities = [3, 2, 2] }
+Hs = { cutoff_A = 3.8, multiplicities = [3, 2, 2] }
+Mt = { cutoff_A = 3.8, multiplicities = [3, 2, 2] }
+Ds = { cutoff_A = 3.8, multiplicities = [3, 2, 2] }
+Rg = { cutoff_A = 3.8, multiplicities = [3, 2, 2] }
+Cn = { cutoff_A = 3.8, multiplicities = [3, 2, 2] }
+Nh = { cutoff_A = 3.8, multiplicities = [3, 2, 2, 1] }
+Fl = { cutoff_A = 3.8, multiplicities = [3, 2, 2, 1] }
+Mc = { cutoff_A = 3.8, multiplicities = [3, 2, 2, 1] }
+Lv = { cutoff_A = 3.8, multiplicities = [3, 2, 2, 1] }
+Ts = { cutoff_A = 3.8, multiplicities = [3, 2, 2, 1] }
+Og = { cutoff_A = 3.8, multiplicities = [3, 2, 2, 1] }

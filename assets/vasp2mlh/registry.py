@@ -42,9 +42,13 @@ def freeze(config, output, potcar=None):
     write_registry(basis, output, "imported", hashes)
 
 
-def write_registry(basis, output, method, paw_hashes=None, layout=None):
+def write_registry(basis, output, method, paw_hashes=None, layout=None, *, preset=None):
     with output_file(output) as temp, h5py.File(temp, "w") as out:
         out.attrs["method"] = method
+        if method == "paw-native-v1":
+            out.attrs["method_status"] = "legacy"
+        if preset is not None:
+            out.attrs["preset"] = preset
         if layout is not None:
             out.attrs["layout"] = json.dumps(layout, sort_keys=True)
         out.attrs.update(

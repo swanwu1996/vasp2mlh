@@ -8,11 +8,13 @@ from unittest.mock import patch
 
 import h5py
 import numpy as np
+from ase.data import chemical_symbols
 from ase import Atoms
 from ase.io import write
 from scipy.integrate import simpson
 
-from vasp2mlh.atomic import generate
+from vasp2mlh.atomic import DEFAULT_LAYOUT, generate
+from vasp2mlh.configuration import load_config
 from vasp2mlh.cli import genbasis_main
 from vasp2mlh.basis import Shell, load_basis
 from vasp2mlh.overlap import overlap, quadrature_blocks
@@ -77,7 +79,9 @@ class RegistryTests(unittest.TestCase):
             cfg = Path("basis.toml")
             cfg.write_text('command="convert"')
             genbasis_main([])
-            generate.assert_called_once_with("basis.h5", ["POTCAR"], None)
+            generate.assert_called_once_with(
+                "basis.h5", ["POTCAR"], None, "paw-compact-v1"
+            )
             with self.assertRaises(SystemExit):
                 genbasis_main(["basis.toml"])
             with self.assertRaises(SystemExit):
@@ -90,13 +94,64 @@ class RegistryTests(unittest.TestCase):
             cfg.write_text('[parameters]\nlayout="layout.toml"')
             genbasis_main([str(cfg)])
             self.assertEqual(
-                calls, [(folder.resolve(), ("basis.h5", ["POTCAR"], "layout.toml"))]
+                calls,
+                [
+                    (
+                        folder.resolve(),
+                        ("basis.h5", ["POTCAR"], "layout.toml", "paw-compact-v1"),
+                    )
+                ],
+            )
+            cfg.write_text('[parameters]\nmethod="paw-native-v1"')
+            genbasis_main([str(cfg)])
+            self.assertEqual(
+                calls[-1][1], ("basis.h5", ["POTCAR"], None, "paw-native-v1")
             )
             cfg.write_text('[parameters]\noutput="basis.toml"')
             with self.assertRaises(SystemExit):
                 genbasis_main([str(cfg)])
-            self.assertEqual(generate.call_count, 2)
+            self.assertEqual(generate.call_count, 3)
             self.assertEqual(Path.cwd(), Path(temp))
+
+    def test_builtin_layout_and_short_paw_grid(self):
+        defaults = load_config(DEFAULT_LAYOUT)
+        self.assertEqual(set(defaults), set(chemical_symbols[1:]))
+        for recipe in defaults.values():
+            self.assertGreater(recipe["cutoff_A"], 0)
+            self.assertTrue(
+                all(type(n) is int and n > 0 for n in recipe["multiplicities"])
+            )
+        grid = np.linspace(0.001, 2, 81)
+        pot = SimpleNamespace(
+            element="Mo",
+            ls=[0],
+            grid=grid,
+            sha256="reference",
+            waves=[grid * np.exp(-grid)],
+        )
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch("vasp2mlh.atomic.read_potcar", return_value={"Mo": pot}),
+        ):
+            output = Path(tmp) / "default.h5"
+            generate(output, ["pot"])
+            with h5py.File(output) as f:
+                self.assertEqual(f.attrs["method"], "paw-compact-v1")
+                self.assertEqual(f.attrs["preset"], DEFAULT_LAYOUT.stem)
+                self.assertEqual(
+                    json.loads(f.attrs["layout"]),
+                    {"Mo": {"cutoff_A": 2.0, "multiplicities": [3, 2, 2]}},
+                )
+            shells = read_registry(output)["Mo"]
+            self.assertEqual([s.l for s in shells], [0, 0, 0, 1, 1, 2, 2])
+            self.assertTrue(all(s.radius[-1] == 2.0 for s in shells))
+            recipe = Path(tmp) / "custom.json"
+            recipe.write_text(json.dumps({"Mo": defaults["Mo"]}))
+            with self.assertRaisesRegex(ValueError, "outside the PAW radial grid"):
+                generate(output, ["pot"], recipe)
+            self.assertEqual(
+                fingerprint(shells), fingerprint(read_registry(output)["Mo"])
+            )
 
     def test_matched_paw_libraries_and_polarization(self):
         r = np.linspace(0.001, 4, 81)
@@ -118,7 +173,11 @@ class RegistryTests(unittest.TestCase):
             recipe.write_text(
                 json.dumps({"He": {"cutoff_A": 3.0, "multiplicities": [2, 1, 1]}})
             )
-            generate(raw, ["pot"])
+            generate(raw, ["pot"], method="paw-native-v1")
+            with h5py.File(raw) as f:
+                self.assertEqual(f.attrs["method_status"], "legacy")
+            with self.assertRaisesRegex(ValueError, "custom layout requires"):
+                generate(raw, ["pot"], recipe, method="paw-native-v1")
             generate(standard, ["pot"], recipe)
             self.assertEqual([s.l for s in read_registry(raw)["He"]], [0, 1])
             actual = load_basis(standard, {"He": pot}, ["He"])["He"]

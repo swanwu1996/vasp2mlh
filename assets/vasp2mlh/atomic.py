@@ -71,7 +71,16 @@ def compact_shells(pot, layout):
     return result
 
 
-def generate(output, potcars, layout_file=None):
+COMPACT_METHOD = "paw-compact-v1"
+NATIVE_METHOD = "paw-native-v1"
+DEFAULT_LAYOUT = Path(__file__).with_name("compact-defaults-v1.toml")
+
+
+def generate(output, potcars, layout_file=None, method=COMPACT_METHOD):
+    if method not in (COMPACT_METHOD, NATIVE_METHOD):
+        raise ValueError(f"Unknown AO generation method: {method}")
+    if layout_file and method == NATIVE_METHOD:
+        raise ValueError("A custom layout requires paw-compact-v1")
     inputs = [*potcars] + ([layout_file] if layout_file else [])
     if Path(output).resolve() in {Path(f).resolve() for f in inputs}:
         raise ValueError("Choose a separate registry output")
@@ -88,6 +97,21 @@ def generate(output, potcars, layout_file=None):
     layout = load_config(layout_file) if layout_file else None
     if layout is not None and (not layout or not set(layout) <= set(pots)):
         raise ValueError("Supply a PAW reference for every element in the layout")
+    preset = None
+    if method == COMPACT_METHOD and layout is None:
+        defaults = load_config(DEFAULT_LAYOUT)
+        layout = {}
+        for sym, pot in pots.items():
+            if sym not in defaults:
+                raise ValueError(
+                    f"No default compact layout for {sym}; supply an explicit layout"
+                )
+            recipe = defaults[sym]
+            layout[sym] = {
+                **recipe,
+                "cutoff_A": min(recipe["cutoff_A"], float(pot.grid[-1])),
+            }
+        preset = DEFAULT_LAYOUT.stem
     basis = {}
     for sym in sorted(pots if layout is None else layout):
         pot = pots[sym]
@@ -103,7 +127,8 @@ def generate(output, potcars, layout_file=None):
     write_registry(
         basis,
         output,
-        "paw-native-v1" if layout is None else "paw-compact-v1",
+        method,
         {s: pots[s].sha256 for s in basis},
         layout,
+        preset=preset,
     )

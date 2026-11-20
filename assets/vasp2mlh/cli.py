@@ -8,6 +8,7 @@ from xml.etree.ElementTree import ParseError
 import h5py
 import numpy as np
 
+from .atomic import COMPACT_METHOD, NATIVE_METHOD
 from .comparison import compare_path, write_comparison
 from .analysis import held_out, locality, lobster_summary, spectra
 from .sparse import sparsify
@@ -40,7 +41,7 @@ def make_parser():
     )
     single.add_argument(
         "--registry",
-        help="frozen AO basis (default: RUN/basis.h5 if present, otherwise POTCAR native orbitals)",
+        help="frozen AO basis (default: RUN/basis.h5 if present, otherwise paw-compact-v1 from POTCAR)",
     )
     single.add_argument(
         "-o",
@@ -197,13 +198,19 @@ def make_parser():
     report.add_argument("--output", help="write the embedded validation report to JSON")
     gen = subs.add_parser(
         "basis-generate",
-        help="generate a raw PAW reference or a compact multi-zeta AO registry",
+        help="generate a compact multi-zeta AO registry or legacy PAW reference",
     )
     gen.add_argument("output")
+    gen.add_argument(
+        "--method",
+        choices=(COMPACT_METHOD, NATIVE_METHOD),
+        default=COMPACT_METHOD,
+        help="default: paw-compact-v1; paw-native-v1 is the legacy baseline",
+    )
     gen.add_argument("--potcar", nargs="+", required=True)
     gen.add_argument(
         "--layout",
-        help="JSON element cutoffs in angstrom and shell multiplicities; omit for the raw PAW baseline",
+        help="custom TOML/JSON element cutoffs and shell multiplicities (default: built-in compact layout)",
     )
     opt = subs.add_parser(
         "basis-optimize",
@@ -430,10 +437,10 @@ def genbasis_main(argv=None):
     parser = argparse.ArgumentParser(
         prog="vasp2mlh_genbasis",
         description="Generate a frozen AO basis from VASP PAW POTCAR files.",
-        epilog="With no argument: read ./POTCAR and write ./basis.h5 using all native "
-        "pseudo partial waves (paw-native-v1). Pass basis.toml explicitly to use "
-        "its settings; paths resolve from that file. An optional layout selects "
-        "compact orbitals (paw-compact-v1). A successful run replaces its output file.",
+        epilog="With no argument: read ./POTCAR and write ./basis.h5 using the built-in "
+        "paw-compact-v1 element layouts. Pass basis.toml explicitly for a custom "
+        "layout or method=paw-native-v1 (legacy). Paths resolve from that file. "
+        "A successful run replaces its output file.",
     )
     parser.add_argument(
         "--version", action="version", version=f"%(prog)s {__version__}"
@@ -558,7 +565,9 @@ def run_cli(argv, program):
                 if "threads" not in settings:
                     stack.enter_context(threadpool_limits(limits=1))
                 execute(parser, args)
-                method = "paw-compact-v1" if args.layout else "paw-native-v1"
+                method = args.method + (
+                    " (legacy)" if args.method == NATIVE_METHOD else ""
+                )
                 print(f"AO basis ({method}): {Path(args.output).resolve()}")
                 return
             return execute(parser, args)
@@ -606,7 +615,7 @@ def execute(parser, args):
     elif args.command == "basis-generate":
         from .atomic import generate
 
-        generate(args.output, args.potcar, args.layout)
+        generate(args.output, args.potcar, args.layout, args.method)
     elif args.command == "basis-optimize":
         from .spillage import optimize
 

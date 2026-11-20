@@ -1,7 +1,8 @@
 # Run: vasp2mlh_genbasis basis.toml
-# Without an argument, use ./POTCAR and write ./basis.h5 (native PAW orbitals).
+# With no argument: ./POTCAR -> ./basis.h5, using the built-in compact element layouts.
 command = "basis-generate"
 [parameters]
 potcar = ["POTCAR"]  # paths relative to this file
 output = "basis.h5"
-# layout = "layout.toml"  # enable compact orbitals with element-specific shells and cutoffs
+method = "paw-compact-v1"  # default; use "paw-native-v1" for the legacy baseline
+# layout = "layout.toml"  # optional replacement element layout for compact orbitals
