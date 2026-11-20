@@ -113,6 +113,10 @@ class SingleConversionTests(unittest.TestCase):
                 "efermi": 0.0,
             }
             with (
+                patch(
+                    "vasp2mlh.validation.verify_export",
+                    return_value={"status": "passed"},
+                ) as verify_export,
                 patch("vasp2mlh.validation.metadata", return_value=meta),
                 patch(
                     "vasp2mlh.validation.reference_data",
@@ -130,6 +134,24 @@ class SingleConversionTests(unittest.TestCase):
                 self.assertEqual(failed["status"], "failed")
                 self.assertAlmostEqual(failed["rmse_eV"], 0.001)
                 self.assertEqual(file_sha256(path), before)
+                config.write_text(
+                    config.read_text().replace("max_rmse=0.0", "max_rmse=0.01")
+                )
+                valid_main([str(config)])
+                verify_export.side_effect = FileNotFoundError("missing Hamiltonian")
+                with self.assertRaises(SystemExit):
+                    valid_main([str(config)])
+                failed = load_config(report)
+                self.assertEqual(failed["native_band_status"], "passed")
+                self.assertEqual(failed["export_validation"]["status"], "failed")
+                self.assertEqual(failed["status"], "failed")
+                verify_export.side_effect = None
+                valid_main([str(config)])
+                path.unlink()
+                with self.assertRaises(SystemExit):
+                    valid_main([str(config)])
+                self.assertEqual(load_config(report)["status"], "failed")
+                self.assertIn("Missing", load_config(report)["error"])
 
     def test_output_alias_and_conflict(self):
         with TemporaryDirectory() as temp, patch("vasp2mlh.cli.execute") as execute:

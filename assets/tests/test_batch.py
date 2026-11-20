@@ -10,6 +10,8 @@ from unittest.mock import patch
 import h5py
 import numpy as np
 from scipy.integrate import simpson
+from ase import Atoms
+from types import SimpleNamespace
 
 from vasp2mlh.batch import convert, read_jobs, run_batch
 from vasp2mlh.basis import Shell, compiled_radial, simpson_weights
@@ -46,7 +48,18 @@ class BatchTests(unittest.TestCase):
         self.config["jobs"].append({"id": "b", "run": "absent"})
         self.write()
         log = StringIO()
-        with redirect_stderr(log):
+        with (
+            patch(
+                "vasp2mlh.batch.metadata",
+                return_value={"atoms": Atoms(), "spinor": False},
+            ),
+            patch(
+                "vasp2mlh.batch.projection_header",
+                return_value=(SimpleNamespace(nk=1, ns=1), None),
+            ),
+            patch("vasp2mlh.batch.read_registry", return_value={}),
+            redirect_stderr(log),
+        ):
             summary = run_batch(self.manifest, self.out, check_only=True)
         self.assertIn("2/2", log.getvalue())
         self.assertIn("ready=1", log.getvalue())
@@ -65,6 +78,36 @@ class BatchTests(unittest.TestCase):
             self.config["jobs"][1]["id"] = name
             with self.assertRaisesRegex(ValueError, "job id"):
                 self.write()
+
+    def test_preflight_rejects_source_mode_and_missing_paw_records(self):
+        from vasp2mlh.batch import preflight
+
+        job = self.write()[0]
+        job.update(mode="validated", reference=self.source, potential_run=self.source)
+        (self.source / "CHGCAR").write_text("nonempty")
+        with h5py.File(self.source / "vaspout.h5", "w") as f:
+            f["results/potential/total"] = [0]
+        with patch(
+            "vasp2mlh.batch.metadata",
+            return_value={"operator_parameters": {}, "lreal": "T"},
+        ):
+            with self.assertRaisesRegex(ValueError, "LREAL=T"):
+                preflight(job)
+        with (
+            patch(
+                "vasp2mlh.batch.metadata",
+                return_value={"atoms": Atoms(), "spinor": False},
+            ),
+            patch("vasp2mlh.batch.check_source"),
+            patch(
+                "vasp2mlh.batch.projection_header",
+                return_value=(SimpleNamespace(nk=1, ns=1), [1, 1, 1]),
+            ),
+            patch("vasp2mlh.batch.read_registry", return_value={}),
+            patch("vasp2mlh.batch.check_potential_source"),
+        ):
+            with self.assertRaisesRegex(ValueError, "paw/dij"):
+                preflight(job)
 
     @patch("vasp2mlh.batch.sparsify")
     @patch("vasp2mlh.batch.build")

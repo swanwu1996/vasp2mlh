@@ -17,6 +17,27 @@ def table(node, path):
     return np.array([row.text.split() for row in el], dtype=float)
 
 
+def xc_parameters(settings):
+    names = {
+        "GGA",
+        "METAGGA",
+        "LHFCALC",
+        "LDAU",
+        "XC",
+        "ALDAX",
+        "ALDAC",
+        "AGGAX",
+        "AGGAC",
+        "AEXX",
+        "PARAM1",
+        "PARAM2",
+        "GGA_COMPAT",
+        "VOSKOWN",
+        "LUSE_VDW",
+    }
+    return {k: v for k, v in settings.items() if k in names or k.startswith("LIBXC")}
+
+
 def metadata(path):
     root = ET.parse(path).getroot()
     atoms = [

@@ -22,7 +22,20 @@ from .model import (
     localized_transform,
     bloch,
 )
-from .vasp import Wavecar, plane_waves, metadata
+from .vasp import Wavecar, plane_waves, metadata, xc_parameters
+
+
+def paths_collide(output, inputs):
+    target = Path(output)
+    for entry in inputs:
+        if entry is None:
+            continue
+        source = Path(entry)
+        if target.resolve() == source.resolve() or (
+            target.exists() and source.exists() and target.samefile(source)
+        ):
+            return True
+    return False
 
 
 @contextmanager
@@ -46,20 +59,8 @@ def file_sha256(path):
     return digest.hexdigest()
 
 
-def build(
-    run,
-    config,
-    output,
-    mesh=None,
-    complement=0.0,
-    potential_run=None,
-    *,
-    on_kpoint=None,
-):
-    if not np.isfinite(complement):
-        raise ValueError("Complement energy must be finite")
-    run = Path(run)
-    meta = metadata(run / "vasprun.xml")
+def projection_header(run, meta, mesh):
+    """Validate the WAVECAR header and XML mesh without reading coefficients."""
     atoms = meta["atoms"]
     w = Wavecar(run / "WAVECAR")
     xml_e = meta["eig"]
@@ -80,9 +81,29 @@ def build(
     mesh = mesh if mesh is not None else meta["mesh"]
     if mesh is None:
         raise ValueError("Pass --mesh Nx Ny Nz for an explicit full k list")
-    # Use double precision WAVECAR coordinates for the Fourier phases.
-    points = np.empty_like(k)
     mesh_indices(k, mesh)
+    return w, mesh
+
+
+def build(
+    run,
+    config,
+    output,
+    mesh=None,
+    complement=0.0,
+    potential_run=None,
+    *,
+    on_kpoint=None,
+):
+    if not np.isfinite(complement):
+        raise ValueError("Complement energy must be finite")
+    run = Path(run)
+    meta = metadata(run / "vasprun.xml")
+    w, mesh = projection_header(run, meta, mesh)
+    atoms = meta["atoms"]
+    xml_e = meta["eig"]
+    k = meta["kpoints"]
+    points = np.empty_like(k)
     potentials = read_potcar(run / "POTCAR")
     symbols = atoms.get_chemical_symbols()
     basis = load_basis(config, potentials, symbols)
@@ -229,11 +250,7 @@ def build(
                 {s: potentials[s].sha256 for s in set(symbols)}, sort_keys=True
             ),
             xc_settings=json.dumps(
-                {
-                    key: val
-                    for key, val in meta["operator_parameters"].items()
-                    if key in {"GGA", "METAGGA", "LHFCALC", "LDAU", "XC"}
-                },
+                xc_parameters(meta["operator_parameters"]),
                 sort_keys=True,
             ),
         )

@@ -7,11 +7,26 @@ from ase import Atoms
 from scipy.linalg import block_diag, eigvalsh
 
 from vasp2mlh.basis import Shell, harmonics
-from vasp2mlh.model import project, localized_transform, mesh_indices, bloch
+from vasp2mlh.model import project, localized_transform, mesh_indices, bloch, mesh_fourier
 from vasp2mlh.vasp import Wavecar, plane_waves, HSQDTM
 
 
 class ProjectionTests(unittest.TestCase):
+    def test_tiled_fourier_matches_direct_sum_on_shifted_shuffled_mesh(self):
+        mesh = [3, 4, 2]
+        residues = np.indices(mesh).reshape(3, -1).T
+        rng = np.random.default_rng(929)
+        k = ((residues + [0.2, 0.5, 0.0]) / mesh)[rng.permutation(len(residues))]
+        a = rng.normal(size=(2, len(k), 5, 7)) + 1j * rng.normal(size=(2, len(k), 5, 7))
+        before = a.copy()
+        direct = np.einsum(
+            "rk,skij->srij", np.exp(-2j * np.pi * residues @ k.T), a
+        ) / len(k)
+        np.testing.assert_allclose(
+            mesh_fourier(k, mesh, residues, a, work_bytes=1), direct, atol=1e-13
+        )
+        np.testing.assert_array_equal(a, before)
+
     def test_metric_and_energy_gauge(self):
         rng = np.random.default_rng(19)
         p = rng.normal(size=(7, 2)) + 1j * rng.normal(size=(7, 2))

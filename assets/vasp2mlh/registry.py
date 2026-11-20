@@ -11,6 +11,7 @@ from .configuration import load_config
 from .basis import Shell, load_basis, read_potcar
 from .pipeline import output_file
 from .realspace import SPARSE_FORMAT, structure
+from .vasp import xc_parameters
 
 FORMAT = "vasp2mlh/basis-registry/1"
 ANGULAR = "real tesseral m=-l..l, Wikipedia"
@@ -192,6 +193,44 @@ def inspect_basis(f, expected):
     return result
 
 
+def label_definition(f):
+    """Settings that define H/S, independent of the structure and energy zero."""
+    attrs = f.attrs
+    method = attrs.get("hamiltonian_method", "spectral")
+    settings = dict(
+        version=1,
+        method=method,
+        metric=attrs["metric"],
+        spinor=bool(attrs["spinor"]),
+        soc=bool(attrs["soc"]),
+        channels=int(attrs["spin_channels"]),
+        saxis=attrs["saxis"].tolist() if attrs["spinor"] else None,
+        energy_unit=attrs.get("energy_unit", "eV"),
+        fourier=attrs.get("fourier"),
+    )
+    for key in (
+        "subspace_bands",
+        "complement_eV",
+        "alignment_width_eV",
+        "degeneracy_eV",
+        "calibration_plateau",
+    ):
+        if key in attrs:
+            settings[key] = np.asarray(attrs[key]).tolist()
+    if method == "filtered_paw_ritz":
+        for key in ("filter_width_eV", "filter_floor", "filter_taper_eV"):
+            settings[key] = float(attrs[key])
+        settings["centre_offset_eV"] = round(
+            float(attrs["filter_centre_eV"] - attrs["fermi_eV"]), 10
+        )
+    if attrs["format"] == SPARSE_FORMAT:
+        report = json.loads(attrs["truncation_report"])
+        for key in ("cutoff_A", "h_tol_eV", "s_tol", "relative_pruning"):
+            settings[key] = report[key]
+        settings["spinless_time_reversal"] = report.get("spinless_time_reversal", False)
+    return settings
+
+
 def audit(models, registry=None, labels=False):
     expected = (
         None
@@ -210,7 +249,7 @@ def audit(models, registry=None, labels=False):
     known_paw = {}
     known_xc = set()
     reports = []
-    modes = set()
+    first_definition = None
     for path in models:
         with h5py.File(path) as f:
             info = inspect_basis(f, expected)
@@ -218,7 +257,11 @@ def audit(models, registry=None, labels=False):
                 if known.setdefault(sym, sig) != sig:
                     raise ValueError(f"Inconsistent radial basis for {sym} in {path}")
             paw = json.loads(f.attrs.get("paw_sha256_by_element", "{}"))
-            if paw and set(paw) != set(info["orbitals_by_element"]):
+            if (labels or paw) and (
+                not isinstance(paw, dict)
+                or set(paw) != set(info["orbitals_by_element"])
+                or not all(isinstance(v, str) and v.strip() for v in paw.values())
+            ):
                 raise ValueError("Incomplete element-wise PAW provenance")
             for sym, sig in paw.items():
                 if sym in paw_required and paw_required[sym] != sig:
@@ -227,33 +270,49 @@ def audit(models, registry=None, labels=False):
                     raise ValueError(f"Inconsistent source PAW for {sym} in {path}")
             info["source_paw_recorded"] = bool(paw)
             if labels:
-                if "xc_settings" in f.attrs:
-                    known_xc.add(
-                        json.dumps(json.loads(f.attrs["xc_settings"]), sort_keys=True)
-                    )
-                    if len(known_xc) > 1:
-                        raise ValueError(
-                            "Dataset has different exchange-correlation settings"
+                xc = json.loads(f.attrs.get("xc_settings", "{}"))
+                if not isinstance(xc, dict) or not xc:
+                    raise ValueError(f"Missing XC provenance in {path}")
+                for group in ("source_validation", "band_validation"):
+                    if group in f:
+                        source = json.loads(f[group].attrs["report"]).get(
+                            "operator_settings", {}
                         )
+                        recorded = xc_parameters(source)
+                        if any(
+                            k in recorded and v != recorded[k] for k, v in xc.items()
+                        ):
+                            raise ValueError(f"Conflicting XC provenance in {path}")
+                        xc = {**recorded, **xc}
+                        break
+                if xc.get("GGA") in ("LI", "LIBXC") and not xc.get("LIBXC1"):
+                    raise ValueError(f"Missing Libxc functional identity in {path}")
+                known_xc.add(json.dumps(xc, sort_keys=True))
+                if len(known_xc) > 1:
+                    raise ValueError(
+                        "Dataset has different exchange-correlation settings"
+                    )
                 if "hamiltonian_dimension" not in info:
                     raise ValueError("Expected Hamiltonian labels")
-                modes.add(
-                    (
-                        bool(f.attrs["spinor"]),
-                        bool(f.attrs["soc"]),
-                        int(f.attrs["spin_channels"]),
-                        tuple(f.attrs["saxis"]) if f.attrs["spinor"] else (),
-                        f.attrs["metric"],
-                        f.attrs.get("hamiltonian_method", "spectral"),
-                        "subspace_bands" in f.attrs,
-                        f.attrs.get("alignment_width_eV"),
-                        f.attrs.get("degeneracy_eV"),
-                        f.attrs.get("complement_eV"),
-                    )
-                )
-                if len(modes) > 1:
+                try:
+                    definition = label_definition(f)
+                    json.dumps(definition, allow_nan=False)
+                except (KeyError, TypeError, ValueError) as exc:
                     raise ValueError(
-                        "Dataset has incompatible spin, metric or Hamiltonian definitions"
+                        f"Unverifiable Hamiltonian definition in {path}: {exc}"
+                    ) from exc
+                if first_definition is None:
+                    first_definition = definition
+                if definition != first_definition:
+                    changed = sorted(
+                        k
+                        for k in definition.keys() | first_definition.keys()
+                        if definition.get(k) != first_definition.get(k)
+                        or (k in definition) != (k in first_definition)
                     )
+                    raise ValueError(
+                        f"Incompatible Hamiltonian definitions in {path}: {', '.join(changed)}"
+                    )
+                info["label_definition"] = definition
             reports.append(dict(path=str(path), **info))
     return reports

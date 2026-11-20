@@ -11,6 +11,57 @@ from .model import adjoint
 from .vasp import HSQDTM, metadata
 
 
+def check_potential_records(f):
+    for field in ("potential/total", "paw/dij", "paw/qij", "paw/lps", "paw/lmax",
+                  "positions/lattice_vectors", "positions/scale", "positions/ion_types",
+                  "positions/number_ion_types", "positions/position_ions", "positions/direct_coordinates"):
+        if not isinstance(f.get("results/" + field), h5py.Dataset):
+            raise ValueError(f"{f.filename} lacks results/{field}. Run VASP with WRT_POTENTIAL=total paw.")
+
+
+def check_potential_source(source, other):
+    atoms, ions = source["atoms"], other["atoms"]
+    params = other["operator_parameters"]
+    if params != source["operator_parameters"]:
+        raise ValueError(
+            "Potential and source calculations have different XC, PAW or FFT settings"
+        )
+
+    def value(name):
+        return params.get(name, "")
+
+    if (
+        source["spinor"]
+        or source["nspin"] != 1
+        or other["spinor"]
+        or other["nspin"] != 1
+        or source["soc"]
+        or other["soc"]
+        or other["lreal"] not in ("F", ".FALSE.")
+        or value("LHFCALC") == "T"
+        or value("METAGGA") not in ("", "--", "F", "NONE")
+        or value("LDAU") == "T"
+    ):
+        raise ValueError(
+            "Direct operator currently supports scalar nonmagnetic semilocal LDA/GGA"
+        )
+    if (
+        atoms.get_chemical_symbols() != ions.get_chemical_symbols()
+        or not np.allclose(atoms.cell, ions.cell, atol=1e-7, rtol=0)
+        or not np.allclose(
+            atoms.get_scaled_positions(),
+            ions.get_scaled_positions(),
+            atol=1e-7,
+            rtol=0,
+        )
+        or not np.isclose(other["encut"], source["encut"])
+        or source["titles"] != other["titles"]
+    ):
+        raise ValueError(
+            "Potential and source calculations have different structures, PAWs or cutoff"
+        )
+
+
 class ScalarOperator:
     """Read the potential and on-site strengths written by WRT_POTENTIAL=total paw."""
 
@@ -18,53 +69,13 @@ class ScalarOperator:
         directory = Path(directory)
         xml_path = directory / "vasprun.xml"
         other = metadata(xml_path)
+        check_potential_source(source, other)
         atoms, ions = source["atoms"], other["atoms"]
-        params = other["operator_parameters"]
-        if params != source["operator_parameters"]:
-            raise ValueError(
-                "Potential and source calculations have different XC, PAW or FFT settings"
-            )
-
-        def value(name):
-            return params.get(name, "")
-
-        if (
-            source["spinor"]
-            or source["nspin"] != 1
-            or other["spinor"]
-            or other["nspin"] != 1
-            or source["soc"]
-            or other["soc"]
-            or other["lreal"] not in ("F", ".FALSE.")
-            or value("LHFCALC") == "T"
-            or value("METAGGA") not in ("", "--", "F", "NONE")
-            or value("LDAU") == "T"
-        ):
-            raise ValueError(
-                "Direct operator currently supports scalar nonmagnetic semilocal LDA/GGA"
-            )
-        if (
-            atoms.get_chemical_symbols() != ions.get_chemical_symbols()
-            or not np.allclose(atoms.cell, ions.cell, atol=1e-7, rtol=0)
-            or not np.allclose(
-                atoms.get_scaled_positions(),
-                ions.get_scaled_positions(),
-                atol=1e-7,
-                rtol=0,
-            )
-            or not np.isclose(other["encut"], source["encut"])
-            or source["titles"] != other["titles"]
-        ):
-            raise ValueError(
-                "Potential and source calculations have different structures, PAWs or cutoff"
-            )
-        self.shape = tuple(int(value(n)) for n in ("NGX", "NGY", "NGZ"))
+        self.shape = tuple(
+            int(other["operator_parameters"][n]) for n in ("NGX", "NGY", "NGZ")
+        )
         with h5py.File(directory / "vaspout.h5") as f:
-            if "results/potential/total" not in f or "results/paw" not in f:
-                raise ValueError(
-                    f"{directory / 'vaspout.h5'} lacks total potential or PAW strengths. "
-                    "Run VASP with WRT_POTENTIAL=total paw."
-                )
+            check_potential_records(f)
             geo = f["results/positions"]
             cell = geo["lattice_vectors"][:] * geo["scale"][()]
             symbols = np.repeat(geo["ion_types"].asstr()[:], geo["number_ion_types"][:])

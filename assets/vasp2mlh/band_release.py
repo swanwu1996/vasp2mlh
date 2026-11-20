@@ -149,7 +149,7 @@ def score_window(
     return summary, pairs
 
 
-def reference_data(src, reference, hashes):
+def reference_points(src, reference):
     ref = metadata(reference / "vasprun.xml")
     check_scalar(ref)
     check_convergence(ref, reference)
@@ -169,11 +169,24 @@ def reference_data(src, reference, hashes):
         raise ValueError(
             "Validation structure, PAW, electron count, cutoff or operator settings differ from source"
         )
+    return ref, independent_points(src["kpoints"], ref["kpoints"])
+
+
+def reference_data(src, reference, hashes):
+    ref, selected = reference_points(src, reference)
     for name in ("POTCAR", "CHGCAR"):
         if file_sha256(reference / name) != hashes[name]:
             raise ValueError(f"Validation {name} differs from source")
-    selected = independent_points(src["kpoints"], ref["kpoints"])
     return ref, selected
+
+
+def check_source(src, run):
+    check_scalar(src)
+    check_convergence(src, run)
+    if src["icharg"] != 11 and not (
+        src["icharg"] in (0, 1, 2) and src["writes_charge"]
+    ):
+        raise ValueError("Source must use ICHARG=11 or write its converged SCF density")
 
 
 def reconstruct(
@@ -237,12 +250,7 @@ def reconstruct(
     if output.resolve() in inputs:
         raise ValueError("Model output collides with an input")
     src = metadata(run / "vasprun.xml")
-    check_scalar(src)
-    check_convergence(src, run)
-    if src["icharg"] != 11 and not (
-        src["icharg"] in (0, 1, 2) and src["writes_charge"]
-    ):
-        raise ValueError("Source must use ICHARG=11 or write its converged SCF density")
+    check_source(src, run)
     hashes = {name: file_sha256(run / name) for name in ("POTCAR", "CHGCAR")}
     if reference is not None:
         ref, selected = reference_data(src, reference, hashes)

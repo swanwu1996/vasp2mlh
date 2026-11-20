@@ -16,7 +16,7 @@ import h5py
 from threadpoolctl import threadpool_limits
 
 from . import __version__
-from .band_release import reconstruct
+from .band_release import check_source, reconstruct, reference_points
 from .basis import radial_backend
 from .configuration import (
     BATCH_CONTROLS,
@@ -25,10 +25,13 @@ from .configuration import (
     load_config,
     runtime_controls,
 )
-from .pipeline import build, file_sha256, output_file
+from .pipeline import build, file_sha256, output_file, projection_header
+from .operator import check_potential_records, check_potential_source
+from .vasp import metadata
+from xml.etree.ElementTree import ParseError
 from .realspace import SPARSE_FORMAT
 from .progress import progress_bar
-from .registry import FORMAT as REGISTRY_FORMAT
+from .registry import FORMAT as REGISTRY_FORMAT, read_registry
 from .sparse import sparsify
 
 
@@ -317,6 +320,36 @@ def convert(job, output, threads, backend=None):
         }
 
 
+def preflight(job):
+    for path in input_paths(job):
+        stamp(path)
+    run = job["run"]
+    src = metadata(run / "vasprun.xml")
+    if job["mode"] == "validated":
+        check_source(src, run)
+    wave, _ = projection_header(run, src, job["options"].get("mesh"))
+    symbols = src["atoms"].get_chemical_symbols()
+    basis = read_registry(job["registry"], symbols)
+    counts = {s: sum(2 * sh.l + 1 for sh in shells) for s, shells in basis.items()}
+    dim = sum(counts[s] for s in symbols)
+    hdim = dim * (2 if src["spinor"] else 1)
+    if job["mode"] == "validated":
+        potential_meta = (
+            src
+            if run == job["potential_run"]
+            else metadata(job["potential_run"] / "vasprun.xml")
+        )
+        check_potential_source(src, potential_meta)
+        with h5py.File(job["potential_run"] / "vaspout.h5") as potential:
+            check_potential_records(potential)
+        reference_points(src, job["reference"])
+    return {
+        "kpoints": wave.nk,
+        "orbitals": dim,
+        "dense_hs_bytes": 16 * wave.nk * (wave.ns * hdim**2 + dim**2),
+    }
+
+
 def run_batch(manifest, output=None, workers=None, threads=None, check_only=None):
     import fcntl
 
@@ -394,10 +427,9 @@ def run_batch(manifest, output=None, workers=None, threads=None, check_only=None
         if check_only:
             for job in jobs:
                 try:
-                    for p in input_paths(job):
-                        stamp(p)
-                    record({"id": job["id"], "status": "ready"})
-                except (OSError, ValueError) as exc:
+                    details = preflight(job)
+                    record({"id": job["id"], "status": "ready", **details})
+                except (OSError, ValueError, KeyError, IndexError, ParseError, AttributeError) as exc:
                     record({"id": job["id"], "status": "failed", "error": str(exc)})
         else:
             pool = ProcessPoolExecutor(

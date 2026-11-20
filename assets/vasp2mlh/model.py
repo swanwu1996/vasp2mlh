@@ -3,6 +3,7 @@
 from itertools import product
 
 import numpy as np
+from scipy import fft
 from scipy.linalg import block_diag, cho_factor, cho_solve, eigvalsh
 
 from .basis import harmonics
@@ -130,14 +131,27 @@ def mesh_indices(k, mesh):
     return indices % mesh
 
 
-def mesh_fourier(k, mesh, residues, matrices):
-    """Forward FFT on integer mesh offsets; restore the origin phase for shifted grids."""
+def mesh_fourier(k, mesh, residues, matrices, *, work_bytes=16 * 1024**2):
+    """Fourier transform AO rows in blocks, retaining the shifted-grid phase."""
     indices = mesh_indices(k, mesh)
-    flat = np.ravel_multi_index(indices.T, mesh)
-    ordered = np.take(matrices, np.argsort(flat), axis=-3)
-    grid = ordered.reshape((*matrices.shape[:-3], *mesh, *matrices.shape[-2:]))
-    base = np.fft.fftn(grid, axes=(-5, -4, -3), norm="forward").reshape(matrices.shape)
-    return base * np.exp(-2j * np.pi * residues @ k[0])[:, None, None]
+    permutation = np.argsort(np.ravel_multi_index(indices.T, mesh))
+    phase = np.exp(-2j * np.pi * residues @ k[0])[:, None, None]
+    result = np.empty(
+        matrices.shape, dtype=np.result_type(matrices.dtype, np.complex128)
+    )
+    row_bytes = result.nbytes // result.shape[-2]
+    rows = max(1, work_bytes // row_bytes)
+    for start in range(0, result.shape[-2], rows):
+        subset = slice(start, start + rows)
+        ordered = np.take(matrices[..., subset, :], permutation, axis=-3)
+        grid = ordered.reshape((*ordered.shape[:-3], *mesh, *ordered.shape[-2:]))
+        transformed = fft.fftn(
+            grid, axes=(-5, -4, -3), norm="forward", overwrite_x=True
+        )
+        np.multiply(
+            transformed.reshape(ordered.shape), phase, out=result[..., subset, :]
+        )
+    return result
 
 
 def bloch(k, translations, mr):

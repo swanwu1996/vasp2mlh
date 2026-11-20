@@ -9,7 +9,7 @@ import numpy as np
 from ase.io import write
 from scipy.linalg import block_diag
 
-from .pipeline import output_file
+from .pipeline import output_file, paths_collide
 from .registry import audit
 from .realspace import structure, orbital_bounds, pair_blocks
 
@@ -207,6 +207,8 @@ def ham_graph(f, nao):
 
 
 def hamgnn(models, output, nao=14, registry=None):
+    if Path(output).is_symlink() or paths_collide(output, [*models, registry]):
+        raise ValueError("HamGNN output collides with an input or symlink")
     reports = audit(models, registry, labels=True)
     graphs = {}
     for i, (path, info) in enumerate(zip(models, reports)):

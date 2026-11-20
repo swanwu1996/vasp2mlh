@@ -46,9 +46,10 @@ class ConfigurationTests(unittest.TestCase):
             path.write_text(
                 'mode="projection"\noutput="out"\nregistry="basis.h5"\n[runtime]\nworkers=2\nthreads=1\ncheck_only=true\n[[jobs]]\nid="a"\nrun="."\n'
             )
-            main([str(path)])
+            with self.assertRaises(SystemExit):
+                main([str(path)])
             self.assertEqual(
-                load_config(p / "out/preflight.json")["jobs"][0]["status"], "ready"
+                load_config(p / "out/preflight.json")["jobs"][0]["status"], "failed"
             )
             self.assertFalse((p / "out/a.h5").exists())
             path.write_text(

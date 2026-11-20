@@ -13,7 +13,7 @@ from .comparison import compare_path, write_comparison
 from .analysis import held_out, locality, lobster_summary, spectra
 from .sparse import sparsify
 from .export import deeph, deeph_batch, hamgnn
-from .pipeline import bands, build, validate, output_file
+from .pipeline import bands, build, validate, output_file, paths_collide
 
 
 def make_parser():
@@ -242,6 +242,7 @@ def make_parser():
     )
     audit.add_argument("registry")
     audit.add_argument("models", nargs="+")
+    audit.add_argument("--labels", action="store_true", help="require compatible ML training labels")
     batch = subs.add_parser(
         "deeph-batch", help="export a checked cohort of DeepH samples"
     )
@@ -524,7 +525,7 @@ def main(argv=None, *, validation_only=False):
                     os.chdir(path.parent)
                     for name in ("output", "output_dir", "destination"):
                         dest = getattr(args, name, None)
-                        if dest is not None and Path(dest).resolve() == path:
+                        if dest is not None and paths_collide(dest, [path]):
                             raise ValueError("Output collides with control file")
                     stack.enter_context(backend_setting(settings.get("backend")))
                     if command != "convert" and "threads" in settings:
@@ -621,7 +622,7 @@ def execute(parser, args):
     elif args.command == "basis-check":
         from .registry import audit
 
-        print(json.dumps(audit(args.models, args.registry), indent=2))
+        print(json.dumps(audit(args.models, args.registry, labels=args.labels), indent=2))
     elif args.command == "deeph-batch":
         deeph_batch(args.models, args.output, args.basis_lock)
     elif args.command == "calibrate":

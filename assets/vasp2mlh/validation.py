@@ -2,14 +2,14 @@
 
 import json
 from pathlib import Path
-from xml.etree.ElementTree import ParseError
+from .readback import verify_export
 
 import h5py
 import numpy as np
 
 from .band_release import reference_data, score_window
 from .configuration import DEFAULT_ENERGY_WINDOW
-from .pipeline import file_sha256, output_file
+from .pipeline import file_sha256, output_file, paths_collide
 from .vasp import metadata
 
 
@@ -19,15 +19,20 @@ def validate_sample(args, config):
     output = Path(args.output_dir) if args.output_dir else run / "mlh"
     model_path = output / "model.h5"
     target = output / "validation.json"
-    if target.is_symlink() or target.resolve() == config:
+    if target.is_symlink() or paths_collide(target, [config, model_path]):
         raise ValueError(
             "Validation report destination collides with a symlink or configuration"
         )
-    if not model_path.is_file():
-        raise ValueError(
-            f"Missing {model_path}. Run vasp2mlh with this configuration first."
-        )
+    report = {
+        "status": "failed",
+        "native_band_status": "failed",
+        "export_validation": {"format": args.format, "status": "not_checked"},
+    }
     try:
+        if not model_path.is_file():
+            raise ValueError(
+                f"Missing {model_path}. Run v2h with this configuration first."
+            )
         with h5py.File(model_path, "r") as model:
             # Older combined conversions kept source provenance in band_validation.
             group = (
@@ -95,16 +100,21 @@ def validate_sample(args, config):
                 max_limit_eV=limits[1],
                 **blind,
             )
-    except (ValueError, KeyError, OSError, ParseError, np.linalg.LinAlgError) as exc:
-        with output_file(target) as tmp:
-            tmp.write_text(
-                json.dumps({"status": "failed", "error": str(exc)}, indent=2) + "\n"
+            report["native_band_status"] = report["status"]
+            report["export_validation"] = {"format": args.format, "status": "failed"}
+            report["export_validation"] = verify_export(
+                output, args.format, model, ref["kpoints"][selected], args.nao_max
             )
-        raise
+    except Exception as exc:
+        report.update(status="failed", error=str(exc))
+        if output.is_dir():
+            with output_file(target) as tmp:
+                tmp.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
+        raise ValueError(str(exc)) from exc
     with output_file(target) as tmp:
         tmp.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
     print(
-        f"Independent band error: RMS {1000 * blind['rmse_eV']:.3f} meV, maximum {1000 * blind['max_error_eV']:.3f} meV"
+        f"Independent band error: RMS {1000 * blind['rmse_eV']:.3f} meV, maximum {1000 * blind['max_error_eV']:.3f} meV; {blind['observations']} states on {blind['scored_k']}/{len(selected)} independent k points"
     )
     print(f"Validation report: {target.absolute()}")
     if failed:
