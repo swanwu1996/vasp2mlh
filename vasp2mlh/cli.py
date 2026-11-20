@@ -5,6 +5,7 @@ from xml.etree.ElementTree import ParseError
 import h5py
 import numpy as np
 
+from .comparison import compare_path, write_comparison
 from .analysis import held_out, locality, lobster_summary, spectra
 from .sparse import sparsify
 from .export import deeph, hamgnn
@@ -49,10 +50,17 @@ def main():
     sparse.add_argument(
         "--max-band-change",
         type=float,
-        help="maximum accepted truncation error (all bands, eV)",
+        help="maximum accepted truncation error (eV; defaults to all bands)",
     )
     sparse.add_argument(
         "--check-points", help="additional fractional k triples for validation"
+    )
+    sparse.add_argument(
+        "--band-range",
+        nargs=2,
+        type=int,
+        metavar=("FIRST", "LAST"),
+        help="enforce error limit over these 1-based bands; also report full-spectrum change",
     )
     check = subs.add_parser(
         "validate", help="summarize PAW, Fourier, band and spilling diagnostics"
@@ -91,9 +99,54 @@ def main():
     ham.add_argument("models", nargs="+")
     ham.add_argument("-o", "--output", required=True)
     ham.add_argument("--nao-max", type=int, choices=(14, 19, 26), default=14)
+    subspace = subs.add_parser(
+        "downfold",
+        help="constrain the lowest VASP bands using metric-aware polar orthogonalization",
+    )
+    subspace.add_argument("model")
+    subspace.add_argument("output")
+    subspace.add_argument("--bands", type=int, required=True)
+    subspace.add_argument("--min-weight", type=float, default=0.5)
+    cmp = subs.add_parser(
+        "compare",
+        help="benchmark a model on matched fixed-density VASP and OpenMX band paths",
+    )
+    cmp.add_argument("model")
+    cmp.add_argument("vasp_xml")
+    cmp.add_argument(
+        "openmx_band", help="OpenMX .Band with its corresponding .out alongside"
+    )
+    cmp.add_argument("output", help="local comparison JSON")
+    cmp.add_argument("--title", help="display name for the local viewer")
+    cmp.add_argument(
+        "--edge-bands",
+        type=int,
+        default=2,
+        help="number of ordered bands on each side of filling",
+    )
+    view = subs.add_parser(
+        "view", help="create a self-contained interactive comparison report"
+    )
+    view.add_argument("comparisons", nargs="+")
+    view.add_argument("-o", "--output", required=True)
     args = parser.parse_args()
     try:
-        if args.command == "build":
+        if args.command == "compare":
+            result = compare_path(
+                args.model, args.vasp_xml, args.openmx_band, args.edge_bands
+            )
+            result["title"] = args.title or result["formula"]
+            write_comparison(result, args.output)
+            print(json.dumps(result["errors"], indent=2))
+        elif args.command == "view":
+            from .viewer import render
+
+            render(args.comparisons, args.output)
+        elif args.command == "downfold":
+            from .downfold import downfold
+
+            downfold(args.model, args.output, args.bands, args.min_weight)
+        elif args.command == "build":
             build(args.run, args.basis, args.output, args.mesh, args.complement_eV)
         elif args.command == "sparsify":
             extra = (
@@ -109,6 +162,7 @@ def main():
                         args.s_tol,
                         args.max_band_change,
                         extra,
+                        args.band_range,
                     ),
                     indent=2,
                 )

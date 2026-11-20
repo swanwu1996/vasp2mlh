@@ -1,0 +1,557 @@
+<!doctype html>
+<html lang="zh-CN">
+  <meta charset="utf-8" /><meta
+    name="viewport"
+    content="width=device-width,initial-scale=1"
+  />
+  <title>VASP2MLH · 能带工作台</title>
+  <style>
+    :root {
+      --ink: #142e35;
+      --muted: #50676c;
+      --line: #cedbd8;
+      --accent: #007568;
+      --bg: #eef3f1;
+      color: var(--ink);
+      background: var(--bg);
+      font:
+        15px/1.55 Inter,
+        "Noto Sans CJK SC",
+        system-ui,
+        sans-serif;
+    }
+    * {
+      box-sizing: border-box;
+    }
+    body {
+      margin: 0;
+    }
+    main {
+      max-width: 1200px;
+      margin: auto;
+      padding: 28px clamp(15px, 4vw, 55px) 52px;
+    }
+    header {
+      background: #17383a;
+      color: #e8f6ee;
+      border-bottom: 4px solid #59c4a2;
+      padding: 17px max(4vw, calc((100vw - 1100px) / 2));
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+    header b {
+      font:
+        700 20px/1.5 "IBM Plex Mono",
+        monospace;
+      letter-spacing: 0.03em;
+    }
+    header span {
+      color: #b7d1ca;
+    }
+    h1 {
+      font-size: clamp(25px, 4vw, 38px);
+      letter-spacing: -0.045em;
+      margin: 0;
+    }
+    h2 {
+      font-size: 18px;
+      margin: 0;
+    }
+    p {
+      margin: 6px 0;
+      color: var(--muted);
+    }
+    .top,
+    .cardhead,
+    fieldset,
+    .controls {
+      display: flex;
+      align-items: center;
+      gap: 13px;
+      flex-wrap: wrap;
+    }
+    .top,
+    .cardhead {
+      justify-content: space-between;
+    }
+    .top {
+      margin-bottom: 19px;
+    }
+    .selector,
+    .controls label {
+      display: grid;
+      gap: 4px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .selector select {
+      min-width: min(280px, 90vw);
+    }
+    select,
+    button {
+      font: inherit;
+      color: var(--ink);
+      background: #fff;
+      border: 1px solid #afbfbb;
+      border-radius: 6px;
+      padding: 7px 10px;
+      cursor: pointer;
+    }
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+    .stat,
+    section {
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+    }
+    .stat {
+      padding: 14px 18px;
+    }
+    .stat small {
+      color: var(--muted);
+    }
+    .stat strong {
+      display: block;
+      font:
+        600 24px/1.5 "IBM Plex Mono",
+        monospace;
+      color: var(--accent);
+    }
+    section {
+      padding: 18px 20px;
+      margin-bottom: 14px;
+    }
+    .cardhead {
+      margin-bottom: 8px;
+    }
+    fieldset {
+      border: 0;
+      margin: 0;
+      padding: 0;
+    }
+    .swatch { display:inline-block; width:17px; vertical-align:middle; border-top:3px solid #273b49; margin-right:4px; }
+    .swatch.model { border-color:#008071; border-width:2px; }
+    .swatch.openmx { border-color:#ac4d2b; border-top-style:dashed; border-width:2px; }
+    fieldset label {
+      font-size: 13px;
+      cursor: pointer;
+    }
+    input {
+      accent-color: var(--accent);
+    }
+    svg {
+      width: 100%;
+      height: auto;
+      display: block;
+      font:
+        13px system-ui,
+        sans-serif;
+    }
+    .controls {
+      border-top: 1px solid var(--line);
+      padding-top: 12px;
+    }
+    .controls label:first-child {
+      flex: 2;
+      min-width: 130px;
+    }
+    .controls output {
+      font: 14px/1.6 monospace;
+    }
+    .tablewrap {
+      overflow-x: auto;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-variant-numeric: tabular-nums;
+    }
+    th,
+    td {
+      text-align: right;
+      padding: 7px 5px;
+      border-bottom: 1px solid #e4ebe8;
+      white-space: nowrap;
+    }
+    th:first-child,
+    td:first-child {
+      text-align: left;
+    }
+    th {
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .tbls {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px;
+    }
+    .caption {
+      font-size: 12px;
+      line-height: 1.7;
+      color: var(--muted);
+    }
+    :focus-visible {
+      outline: 3px solid #d0802d;
+      outline-offset: 2px;
+    }
+    @media (max-width: 690px) {
+      main {
+        padding-top: 16px;
+      }
+      .tbls {
+        grid-template-columns: 1fr;
+        gap: 0;
+      }
+      .stats {
+        gap: 5px;
+      }
+      .stat {
+        padding: 9px;
+      }
+      .stat strong {
+        font-size: 17px;
+      }
+      section {
+        padding: 12px;
+      }
+      header {
+        padding: 12px 16px;
+      }
+      .cardhead {
+        align-items: flex-start;
+      }
+      fieldset {
+        gap: 4px;
+      }
+      .top {
+        gap: 8px;
+      }
+    }
+  </style>
+  <header><b>VASP2MLH</b><span>哈密顿量工作台</span></header>
+  <main>
+    <div class="top">
+      <div>
+        <h1>能带对照</h1>
+        <p id="summary"></p>
+      </div>
+      <label class="selector">体系与投影方法<select id="cases"></select></label>
+    </div>
+    <div class="stats">
+      <div class="stat">
+        <small>模型对 VASP · MAE</small><strong id="mae"></strong>
+      </div>
+      <div class="stat">
+        <small>OpenMX 对 VASP · MAE</small><strong id="mxmae"></strong>
+      </div>
+      <div class="stat">
+        <small>独立离网格 k 点</small><strong id="count"></strong>
+      </div>
+    </div>
+    <section>
+      <div class="cardhead">
+        <h2>带边色散</h2>
+        <fieldset aria-label="显示能带">
+          <label><input type="checkbox" data-key="vasp" checked /> <span class="swatch vasp" aria-hidden="true"></span>VASP</label
+          ><label
+            ><input type="checkbox" data-key="model" checked /> <span class="swatch model" aria-hidden="true"></span>投影 H/S</label
+          ><label
+            ><input type="checkbox" data-key="openmx" checked /> <span class="swatch openmx" aria-hidden="true"></span>OpenMX</label
+          >
+        </fieldset>
+      </div>
+      <svg
+        id="plot"
+        viewBox="0 0 880 322"
+        role="img"
+        aria-label="三方带边色散，使用下方滑块逐点读取"
+      ></svg>
+      <div class="controls">
+        <label
+          >沿路径选取 k 点<input
+            type="range"
+            id="point"
+            min="0"
+            value="0" /></label
+        ><output id="coords"></output><button id="csv">导出 CSV</button>
+      </div>
+      <p class="caption">
+        纵轴为相对能量。VASP 与投影 H/S 共用原生 VASP 路径价带顶，OpenMX
+        使用自身路径价带顶。
+      </p>
+    </section>
+    <div class="tbls">
+      <section>
+        <div class="cardhead">
+          <h2>当前 k 点</h2>
+          <small id="kind"></small>
+        </div>
+        <div class="tablewrap">
+          <table>
+            <thead>
+              <tr>
+                <th>带序</th>
+                <th>VASP (eV)</th>
+                <th>H/S (eV)</th>
+                <th>OpenMX (eV)</th>
+              </tr>
+            </thead>
+            <tbody id="reading"></tbody>
+          </table>
+        </div>
+      </section>
+      <section>
+        <h2>离网格误差</h2>
+        <div class="tablewrap">
+          <table>
+            <thead>
+              <tr>
+                <th>对照</th>
+                <th>MAE</th>
+                <th>RMSE</th>
+                <th>最大值</th>
+              </tr>
+            </thead>
+            <tbody id="metrics"></tbody>
+          </table>
+        </div>
+        <p class="caption">单位 meV。等权统计所选带序及唯一离网格点。</p>
+      </section>
+    </div>
+    <section>
+      <h2>矩阵诊断</h2>
+      <p id="diagnostics"></p>
+    </section>
+  </main>
+  <script type="application/json" id="data">
+    <!--LOCAL_DATA-->
+  </script>
+  <script>
+    "use strict";
+    const cases = JSON.parse(document.getElementById("data").textContent),
+      el = (id) => document.getElementById(id);
+    const keys = ["vasp", "model", "openmx"],
+      colors = { vasp: "#273b49", model: "#008071", openmx: "#ac4d2b" },
+      dash = { vasp: "", model: "", openmx: "5 4" };
+    const labels = {
+      model_vasp: "H/S − VASP",
+      openmx_vasp: "OpenMX − VASP",
+      model_openmx: "H/S − OpenMX",
+    };
+    const fmt = (n) => Number(n).toFixed(1),
+      svg = el("plot"),
+      slider = el("point"),
+      selector = el("cases");
+    function selected() {
+      return cases[Number(selector.value)];
+    }
+    function node(tag, attrs = {}, value = null) {
+      const n = document.createElementNS("http://www.w3.org/2000/svg", tag);
+      for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v);
+      if (value !== null) n.textContent = value;
+      svg.appendChild(n);
+      return n;
+    }
+    function row(parent, values) {
+      const tr = parent.insertRow();
+      values.forEach((v) => {
+        tr.insertCell().textContent = v;
+      });
+    }
+    function draw() {
+      const d = selected(),
+        i = Number(slider.value),
+        x = d.distance_inv_A,
+        width = 792,
+        top = 23,
+        bottom = 288;
+      const xx = (j) => 58 + (width * x[j]) / (x[x.length - 1] || 1),
+        vals = keys.flatMap((key) => d.bands_eV[key].flat());
+      const low = Math.floor(vals.reduce((a, b) => Math.min(a, b), Infinity)),
+        high = Math.max(
+          low + 1,
+          Math.ceil(vals.reduce((a, b) => Math.max(a, b), -Infinity)),
+        ),
+        yy = (v) => bottom - ((bottom - top) * (v - low)) / (high - low);
+      svg.replaceChildren();
+      node("text", { x: 9, y: 14, fill: "#46615c" }, "E (eV)");
+      const step = Math.max(1, Math.ceil((high - low) / 6));
+      for (let v = Math.ceil(low / step) * step; v <= high; v += step) {
+        node("line", {
+          x1: 58,
+          x2: 850,
+          y1: yy(v),
+          y2: yy(v),
+          stroke: v === 0 ? "#97ada6" : "#e5ece9",
+        });
+        node(
+          "text",
+          { x: 48, y: yy(v) + 5, "text-anchor": "end", fill: "#526a66" },
+          v,
+        );
+      }
+      const ticks = new Map();
+      d.ticks.forEach(([j, name]) => {
+        const q = xx(j).toFixed(5),
+          prior = ticks.get(q) || [];
+        if (!prior.includes(name)) prior.push(name);
+        ticks.set(q, prior);
+      });
+      for (const [pos, names] of ticks) {
+        node("line", {
+          x1: pos,
+          x2: pos,
+          y1: top,
+          y2: bottom,
+          stroke: "#d4dfda",
+        });
+        node(
+          "text",
+          { x: pos, y: 312, "text-anchor": "middle" },
+          names.map((s) => (s === "G" ? "Γ" : s)).join("|"),
+        );
+      }
+      for (const key of keys) {
+        if (!document.querySelector('[data-key="' + key + '"]').checked)
+          continue;
+        for (let seg = 0; seg < d.ticks.length; seg += 2) {
+          const a = d.ticks[seg][0],
+            b = d.ticks[seg + 1][0];
+          d.band_numbers.forEach((_, band) => {
+            let points = [];
+            for (let j = a; j <= b; j++)
+              points.push(xx(j) + "," + yy(d.bands_eV[key][j][band]));
+            node("polyline", {
+              points: points.join(" "),
+              fill: "none",
+              stroke: colors[key],
+              "stroke-width": key === "vasp" ? 2.8 : 1.8,
+              "stroke-dasharray": dash[key],
+            });
+          });
+        }
+      }
+      node("line", {
+        x1: xx(i),
+        x2: xx(i),
+        y1: top,
+        y2: bottom,
+        stroke: "#5e7770",
+        "stroke-dasharray": "2 4",
+      });
+      el("coords").textContent =
+        "k = (" + d.fractional_k[i].map((v) => v.toFixed(3)).join(", ") + ")";
+      el("kind").textContent = d.mesh_point[i]
+        ? "构建网格"
+        : d.scored[i]
+          ? "离网格"
+          : "重复端点";
+      el("reading").replaceChildren();
+      d.band_numbers.forEach((b, j) =>
+        row(el("reading"), [
+          b,
+          ...keys.map((key) => d.bands_eV[key][i][j].toFixed(4)),
+        ]),
+      );
+    }
+    function activate() {
+      const d = selected();
+      slider.max = d.fractional_k.length - 1;
+      slider.value = 0;
+      el("summary").textContent =
+        d.formula +
+        " · " +
+        d.atoms +
+        " 个原子 · 带序 " +
+        d.band_numbers[0] +
+        "–" +
+        d.band_numbers.at(-1);
+      el("mae").textContent = fmt(1000 * d.errors.model_vasp.mae_eV) + " meV";
+      el("mxmae").textContent =
+        fmt(1000 * d.errors.openmx_vasp.mae_eV) + " meV";
+      el("count").textContent = d.unique_off_mesh;
+      el("metrics").replaceChildren();
+      for (const [key, v] of Object.entries(d.errors))
+        row(el("metrics"), [
+          labels[key],
+          ...["mae_eV", "rmse_eV", "max_eV"].map((k) => fmt(1000 * v[k])),
+        ]);
+      const t = d.truncation;
+      el("diagnostics").textContent =
+        (t
+          ? "存储 " +
+            t.stored_unique_pairs +
+            " 个独立原子对块，有向块保留 " + t.retained_directed_pairs + "/" + t.source_directed_pairs + "；网格最小 S 本征值 " +
+            t.mesh.min_S.toPrecision(3) +
+            "；稀疏化网格全谱最大变化 " +
+            (t.mesh.max_band_change_eV * 1000).toPrecision(3) +
+            " meV。"
+          : "使用稠密 H/S。") +
+        (d.shared_native_drift_eV === null
+          ? ""
+          : " 原生 VASP 共用网格点最大带边漂移 " +
+            fmt(d.shared_native_drift_eV * 1000) +
+            " meV。");
+      if (t && t.band_range_1based) {
+        el("diagnostics").textContent += " 截断验收带序 " + t.band_range_1based.join("–")
+          + "，网格最大变化 " + fmt(t.mesh.window_max_band_change_eV * 1000) + " meV。";
+      }
+      draw();
+    }
+    cases.forEach((c, i) => {
+      selector.add(new Option(c.title || c.formula, i));
+    });
+    selector.onchange = activate;
+    slider.oninput = draw;
+    document.querySelectorAll("[data-key]").forEach((n) => (n.onchange = draw));
+    svg.onclick = (e) => {
+      const p = svg.createSVGPoint();
+      p.x = e.clientX;
+      p.y = e.clientY;
+      const x = p.matrixTransform(svg.getScreenCTM().inverse()).x;
+      const d = selected().distance_inv_A,
+        target = ((x - 58) / 792) * d.at(-1);
+      slider.value = d.reduce(
+        (best, v, j) =>
+          Math.abs(v - target) < Math.abs(d[best] - target) ? j : best,
+        0,
+      );
+      draw();
+    };
+    el("csv").onclick = () => {
+      const d = selected(),
+        lines = [
+          "kx,ky,kz,distance_inv_A,scored,band,vasp_eV,model_eV,openmx_eV",
+        ];
+      d.fractional_k.forEach((k, i) =>
+        d.band_numbers.forEach((b, j) =>
+          lines.push(
+            [
+              ...k,
+              d.distance_inv_A[i],
+              Number(d.scored[i]),
+              b,
+              ...keys.map((key) => d.bands_eV[key][i][j]),
+            ].join(","),
+          ),
+        ),
+      );
+      const url = URL.createObjectURL(
+        new Blob([lines.join("\n")], { type: "text/csv" }),
+      );
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "band-comparison.csv";
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    };
+    activate();
+  </script>
+</html>

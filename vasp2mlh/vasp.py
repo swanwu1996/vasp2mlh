@@ -49,6 +49,7 @@ def metadata(path):
         soc=param("LSORBIT") == "T",
         saxis=list(map(float, param("SAXIS").split())),
         nspin=int(param("ISPIN")),
+        icharg=int(param("ICHARG")),
         encut=float(param("ENMAX")),
         lreal=param("LREAL"),
         spline=param("NLSPLINE") == "T",

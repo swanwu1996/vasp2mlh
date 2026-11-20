@@ -30,6 +30,14 @@ def output_file(path):
         tmp.unlink(missing_ok=True)
 
 
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def build(run, config, output, mesh=None, complement=0.0):
     if not np.isfinite(complement):
         raise ValueError("Complement energy must be finite")
@@ -113,6 +121,7 @@ def build(run, config, output, mesh=None, complement=0.0):
         r, hr, sr = localized_transform(points, mesh, atoms, counts, hs, ss)
         for name, value in {
             "structure/cell": w.cell,
+            "structure/projection_cell": atoms.cell.array,
             "structure/fractional": atoms.get_scaled_positions(wrap=False),
             "structure/Z": atoms.numbers,
             "k/points": points,
@@ -149,8 +158,10 @@ def build(run, config, output, mesh=None, complement=0.0):
             complement_eV=complement,
             shells=json.dumps(ls),
             basis_config=Path(config).read_text(),
-            potcar_sha256=hashlib.sha256((run / "POTCAR").read_bytes()).hexdigest(),
+            potcar_sha256=file_sha256(run / "POTCAR"),
         )
+        if (run / "CHGCAR").is_file() and (run / "CHGCAR").stat().st_size:
+            f.attrs["charge_density_sha256"] = file_sha256(run / "CHGCAR")
         # A compact radial definition independent of external installation paths.
         for symbol, shells in basis.items():
             for i, sh in enumerate(shells):

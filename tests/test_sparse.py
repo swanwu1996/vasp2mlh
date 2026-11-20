@@ -59,6 +59,13 @@ class SparseTests(unittest.TestCase):
                     src, out, max_band_change=1e-11, extra_points=[[0.31, 0.1, 0.2]]
                 )
                 self.assertLess(report["mesh"]["max_delta_H_eV"], 1e-12)
+                windowed = sparsify(src, out, band_range=[1, 2], max_band_change=1e-10)
+                self.assertLessEqual(
+                    windowed["mesh"]["window_max_band_change_eV"],
+                    windowed["mesh"]["max_band_change_eV"],
+                )
+                with self.assertRaisesRegex(ValueError, "Band range"):
+                    sparsify(src, out, band_range=[1, dim + 1])
                 before = out.read_bytes()
                 with self.assertRaisesRegex(ValueError, "band change"):
                     sparsify(src, out, cutoff=1.0, max_band_change=1e-6)

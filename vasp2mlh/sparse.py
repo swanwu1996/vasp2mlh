@@ -12,7 +12,7 @@ from .pipeline import output_file
 from .realspace import SPARSE_FORMAT, matrices_k, pair_blocks, reverse, structure
 
 
-def compare(source, sparse, points, original_h, original_s):
+def compare(source, sparse, points, original_h, original_s, band_range=None):
     h, s = matrices_k(sparse, points)
     smin = float(np.linalg.eigvalsh(s).min())
     report = dict(
@@ -35,6 +35,15 @@ def compare(source, sparse, points, original_h, original_s):
     diff = energies(h, s) - ref
     report["max_band_change_eV"] = float(np.max(abs(diff)))
     report["band_change_rmse_eV"] = float(np.sqrt(np.mean(diff**2)))
+    if band_range is not None:
+        first, last = band_range
+        if first < 1 or last < first or last > diff.shape[-1]:
+            raise ValueError(
+                "Band range must be within the 1-based ordered model spectrum"
+            )
+        selected = diff[:, :, first - 1 : last]
+        report["window_max_band_change_eV"] = float(np.max(np.abs(selected)))
+        report["window_band_change_rmse_eV"] = float(np.sqrt(np.mean(selected**2)))
     return report
 
 
@@ -46,6 +55,7 @@ def sparsify(
     s_tol=0.0,
     max_band_change=None,
     extra_points=None,
+    band_range=None,
 ):
     if Path(model).resolve() == Path(output).resolve():
         raise ValueError("Use a separate destination for the sparse model")
@@ -113,6 +123,7 @@ def sparsify(
             out["pairs/H"] = np.concatenate(hs, axis=1)
             out["pairs/S"] = np.concatenate(ss)
             report = dict(
+                band_range_1based=band_range,
                 source_directed_pairs=len(pairs),
                 stored_unique_pairs=len(keys),
                 retained_directed_pairs=2 * len(keys) - len(atoms),
@@ -124,21 +135,30 @@ def sparsify(
                 max_allowed_band_change_eV=max_band_change,
             )
             grid = src["k/points"][:]
-            report["mesh"] = compare(src, out, grid, src["k/H"][:], src["k/S"][:])
+            report["mesh"] = compare(
+                src, out, grid, src["k/H"][:], src["k/S"][:], band_range
+            )
             if extra_points is not None:
                 k = np.atleast_2d(extra_points)
                 if k.shape[1] != 3 or not len(k) or not np.isfinite(k).all():
                     raise ValueError("Expected finite fractional validation points")
-                report["extra_points"] = compare(src, out, k, *matrices_k(src, k))
+                report["extra_points"] = compare(
+                    src, out, k, *matrices_k(src, k), band_range=band_range
+                )
                 report["extra_points"]["points"] = k.tolist()
+            error_key = (
+                "max_band_change_eV"
+                if band_range is None
+                else "window_max_band_change_eV"
+            )
             for group in ("mesh", "extra_points"):
                 if (
                     group in report
                     and max_band_change is not None
-                    and report[group]["max_band_change_eV"] > max_band_change
+                    and report[group][error_key] > max_band_change
                 ):
                     raise ValueError(
-                        f"{group} band change {report[group]['max_band_change_eV']:.6g} eV exceeds {max_band_change} eV"
+                        f"{group} band change {report[group][error_key]:.6g} eV exceeds {max_band_change} eV"
                     )
             out.attrs["truncation_report"] = json.dumps(report)
     return report
