@@ -1,0 +1,10 @@
+command = "convert"
+[parameters]
+run = "."
+output_dir = "mlh"
+format = "deeph"
+# registry = "basis.h5"
+# energy_window = [-1.0, 2.0]    # eV relative to the source-mesh Fermi level
+# cutoff = 12.0                  # H block radius in angstrom
+# completion_method = "locality-constrained"
+# Independent energies come from KPOINTS_OPT or zero-weight k points in this SCF.

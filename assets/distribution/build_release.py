@@ -78,7 +78,7 @@ def main():
         templates = product / "configs"
         templates.mkdir()
         shutil.copy(package / "compact-defaults-v1.toml", templates)
-        for filename in ("mlh.toml", "validated.toml", "projection.json", "basis.toml", "layout.toml", "bands.toml", "report.json", "deeph.toml"):
+        for filename in ("mlh.toml", "hybrid.toml", "validated.toml", "projection.json", "basis.toml", "layout.toml", "bands.toml", "report.json", "deeph.toml"):
             shutil.copyfile(root / "configs" / filename, templates / filename)
         target = dist / (name + ".tar.gz")
         packed = work / target.name
