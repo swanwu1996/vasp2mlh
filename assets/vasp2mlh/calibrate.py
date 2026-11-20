@@ -96,6 +96,20 @@ def ordinary_geometry(src, ov):
     return atoms, bounds, r_ao, s_ao, k, s_k
 
 
+def overlap_mesh_alias(mesh_r, mesh_s, exact_r, exact_s):
+    """Relative Brillouin-zone RMS error of interpolating the known AO overlap."""
+    mesh = {tuple(r): s for r, s in zip(mesh_r, mesh_s)}
+    error_sq = 0.0
+    norm_sq = 0.0
+    for r, block in zip(exact_r, exact_s):
+        delta = mesh.pop(tuple(r), 0.0) - block
+        error_sq += np.vdot(delta, delta).real
+        norm_sq += np.vdot(block, block).real
+    for block in mesh.values():
+        error_sq += np.vdot(block, block).real
+    return float(np.sqrt(error_sq / norm_sq))
+
+
 def write_ordinary(out, src, atoms, bounds, r_ao, s_ao, k, s_k, hnew):
     # S(R) is known beyond the mesh image cell. Carry the energy origin on
     # that exact support so an absolute energy shift gives c*S(k) at every k.
@@ -108,10 +122,14 @@ def write_ordinary(out, src, atoms, bounds, r_ao, s_ao, k, s_k, hnew):
     dim = s_k.shape[-1]
     for start in range(0, hnew.shape[-1], dim):
         anchored[..., start : start + dim, start : start + dim] -= origin * s_k
-    rh, hr, _ = localized_transform(
+    rh, hr, s_mesh = localized_transform(
         k, src["k/mesh"][:], atoms, np.diff(bounds), anchored, s_k
     )
     out.attrs["interpolation_reference_eV"] = origin
+    out.attrs["overlap_mesh_alias_relative_rms"] = overlap_mesh_alias(
+        rh, s_mesh, r_ao, s_ao
+    )
+    del s_mesh
     translations = np.unique(np.vstack([rh, r_ao]), axis=0)
     mapping = {tuple(r): i for i, r in enumerate(translations)}
     out["real/R"] = translations

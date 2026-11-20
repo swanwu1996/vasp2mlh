@@ -478,6 +478,9 @@ def reconstruct(
                 cutoff_A=cutoff,
                 cutoff_applies_to="H-mu*S" if relative_pruning else "H",
                 mesh=model["k/mesh"][:].tolist(),
+                overlap_mesh_alias_relative_rms=float(
+                    model.attrs["overlap_mesh_alias_relative_rms"]
+                ),
                 basis=basis,
                 cutoff_reference_eV=float(model.attrs["interpolation_reference_eV"]),
                 source_mesh_score=mesh_score,
