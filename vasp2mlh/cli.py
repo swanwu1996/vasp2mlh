@@ -23,6 +23,25 @@ def main():
         "--version", action="version", version=f"%(prog)s {__version__}"
     )
     subs = parser.add_subparsers(dest="command", required=True)
+    bulk = subs.add_parser(
+        "convert-batch",
+        help="convert VASP directories in a JSON manifest to sparse HDF5 models",
+    )
+    bulk.add_argument(
+        "manifest", help="JSON job list, with paths relative to the manifest"
+    )
+    bulk.add_argument("output", help="batch output directory")
+    bulk.add_argument(
+        "--workers", type=int, default=1, help="number of concurrent structures"
+    )
+    bulk.add_argument(
+        "--threads", type=int, default=1, help="BLAS/OpenMP threads per worker"
+    )
+    bulk.add_argument(
+        "--check-only",
+        action="store_true",
+        help="check required file presence and size without conversion",
+    )
     release = subs.add_parser(
         "reconstruct-bands",
         help="build a fixed-basis scalar LDA/GGA model and validate its cutoff spectrum on independent VASP points",
@@ -332,7 +351,15 @@ def main():
     view.add_argument("-o", "--output", required=True)
     args = parser.parse_args()
     try:
-        if args.command == "reconstruct-bands":
+        if args.command == "convert-batch":
+            from .batch import run_batch
+
+            summary = run_batch(
+                args.manifest, args.output, args.workers, args.threads, args.check_only
+            )
+            if summary["status"] == "failed":
+                parser.exit(1, "Some jobs failed; see the batch report.\n")
+        elif args.command == "reconstruct-bands":
             from .band_release import reconstruct
 
             options = vars(args).copy()

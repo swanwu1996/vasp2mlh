@@ -16,6 +16,39 @@ from scipy.special import sph_harm_y, spherical_jn
 from .vasp import BOHR
 
 
+try:
+    from ._radial import integrate as compiled_radial
+except ImportError:
+    compiled_radial = None
+
+
+def radial_backend():
+    choice = os.environ.get("VASP2MLH_RADIAL_BACKEND", "auto")
+    if choice not in ("auto", "cython", "scipy"):
+        raise ValueError("VASP2MLH_RADIAL_BACKEND must be auto, cython or scipy")
+    if choice == "cython" and compiled_radial is None:
+        raise ImportError("Requested Cython radial extension is unavailable")
+    return "cython" if choice != "scipy" and compiled_radial is not None else "scipy"
+
+
+def simpson_weights(r):
+    """Composite nonuniform Simpson rule, including the final even-grid interval."""
+    gaps = np.diff(r)
+    pairs = (len(r) - 1) // 2
+    left, right = gaps[: 2 * pairs : 2], gaps[1 : 2 * pairs : 2]
+    span = left + right
+    weights = np.zeros(len(r))
+    weights[: 2 * pairs : 2] += span / 6 * (2 - right / left)
+    weights[1 : 2 * pairs : 2] += span**3 / (6 * left * right)
+    weights[2 : 2 * pairs + 1 : 2] += span / 6 * (2 - left / right)
+    if len(r) % 2 == 0:
+        a, b = gaps[-2:]
+        weights[-3] -= b**3 / (6 * a * (a + b))
+        weights[-2] += b * (b + 3 * a) / (6 * a)
+        weights[-1] += b * (2 * b + 3 * a) / (6 * (a + b))
+    return weights
+
+
 def harmonics(l, q):
     """Wikipedia real harmonics, m = -l,...,l (p_y,p_z,p_x)."""
     norm = np.linalg.norm(q, axis=1)
@@ -61,14 +94,27 @@ class Shell:
             self.radial = self.radial / np.sqrt(norm)
 
     def transform(self, q):
-        # Integrate once per distinct radius. Bound the temporary Bessel table.
         radii, inverse = np.unique(np.round(q, 12), return_inverse=True)
-        values = np.empty_like(radii)
+        return self.transform_unique(radii)[inverse]
+
+    def transform_unique(self, radii):
+        """Transform distinct, already rounded reciprocal radii in the given order."""
+        values = np.empty(radii.shape, dtype=float)
+        if self.l <= 3 and radial_backend() == "cython":
+            weighted = simpson_weights(self.radius) * self.radius**2 * self.radial
+            compiled_radial(
+                self.l,
+                np.ascontiguousarray(radii, dtype=float),
+                np.ascontiguousarray(self.radius, dtype=float),
+                weighted,
+                values,
+            )
+            return 4 * np.pi * (-1j) ** self.l * values
         for start in range(0, len(radii), 256):
             sl = slice(start, start + 256)
             bessel = spherical_jn(self.l, radii[sl, None] * self.radius)
             values[sl] = simpson(bessel * (self.radius**2 * self.radial), x=self.radius)
-        return 4 * np.pi * (-1j) ** self.l * values[inverse]
+        return 4 * np.pi * (-1j) ** self.l * values
 
 
 def numeric_rows(lines, start):

@@ -1,0 +1,336 @@
+"""Independent VASP conversions on a single POSIX node, with verified restart."""
+
+import hashlib
+import json
+import multiprocessing
+import re
+import sys
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from functools import lru_cache
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from time import monotonic
+
+import h5py
+from threadpoolctl import threadpool_limits
+
+from . import __version__
+from .band_release import reconstruct
+from .basis import radial_backend
+from .pipeline import build, file_sha256, output_file
+from .realspace import SPARSE_FORMAT
+from .registry import FORMAT as REGISTRY_FORMAT
+from .sparse import sparsify
+
+
+def read_jobs(manifest):
+    manifest = Path(manifest).resolve()
+    config = json.loads(manifest.read_text())
+    if not isinstance(config, dict) or not isinstance(config.get("jobs"), list):
+        raise ValueError("Manifest must be an object with a jobs array")
+    if not isinstance(config.get("defaults", {}), dict):
+        raise ValueError("Manifest defaults must be an object")
+    mode = config.get("mode", "validated")
+    modes = {
+        "validated": {
+            "cutoff",
+            "mesh",
+            "energy_window",
+            "band_range",
+            "max_rmse",
+            "max_error",
+            "relative_pruning",
+            "centre_offset",
+            "width",
+            "floor",
+            "taper",
+        },
+        "projection": {"cutoff", "mesh", "complement"},
+    }
+    if (
+        not isinstance(mode, str)
+        or mode not in modes
+        or config.keys() - {"mode", "registry", "defaults", "jobs"}
+    ):
+        raise ValueError("Invalid batch mode or unknown top-level manifest field")
+
+    def path(value):
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("Expected a nonempty manifest path")
+        return (manifest.parent / value).resolve()
+
+    registry = path(config["registry"])
+    jobs = []
+    ids = set()
+    for row in config["jobs"]:
+        if not isinstance(row, dict) or not isinstance(row.get("options", {}), dict):
+            raise ValueError("Each job and its options must be objects")
+        label = row["id"]
+        if (
+            not isinstance(label, str)
+            or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]*", label)
+            or label in ids
+        ):
+            raise ValueError(f"Duplicate or invalid job id: {label!r}")
+        ids.add(label)
+        allowed = {"id", "run", "options"}
+        if mode == "validated":
+            allowed.update(("reference", "potential_run"))
+        options = {**config.get("defaults", {}), **row.get("options", {})}
+        if row.keys() - allowed or options.keys() - modes[mode]:
+            raise ValueError(f"Unknown field or option for {mode} job {label}")
+        if mode == "validated" and (
+            not {"cutoff", "max_rmse", "max_error"} <= options.keys()
+            or len(options.keys() & {"energy_window", "band_range"}) != 1
+        ):
+            raise ValueError(
+                f"Job {label} needs cutoff, both tolerances and exactly one window"
+            )
+        job = {
+            "id": label,
+            "mode": mode,
+            "run": path(row["run"]),
+            "registry": registry,
+            "options": options,
+        }
+        if mode == "validated":
+            job["reference"] = path(row["reference"])
+            job["potential_run"] = path(row.get("potential_run", row["run"]))
+        jobs.append(job)
+    if not jobs:
+        raise ValueError("Manifest has no jobs")
+    return jobs
+
+
+def input_paths(job):
+    source = job["run"]
+    paths = [
+        job["registry"],
+        *(source / n for n in ("WAVECAR", "vasprun.xml", "POTCAR")),
+    ]
+    if job["mode"] == "validated":
+        potential, reference = job["potential_run"], job["reference"]
+        paths += [source / "CHGCAR", potential / "vaspout.h5"]
+        for folder in (potential, reference):
+            paths.extend(folder / n for n in ("vasprun.xml", "POTCAR", "CHGCAR"))
+        paths.extend(
+            d / "OUTCAR" for d in (source, reference) if (d / "OUTCAR").exists()
+        )
+    elif (source / "CHGCAR").is_file() and (source / "CHGCAR").stat().st_size:
+        paths.append(source / "CHGCAR")
+    return list(dict.fromkeys(paths))
+
+
+def stamp(path):
+    s = path.stat()
+    if not path.is_file() or not s.st_size:
+        raise ValueError(f"Missing or empty input {path}")
+    return s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns
+
+
+@lru_cache(maxsize=256)
+def hash_at_stamp(path, identity):
+    digest = file_sha256(path)
+    if stamp(path) != identity:
+        raise ValueError(f"Input changed while hashing: {path}")
+    return digest
+
+
+def write_json(path, data):
+    with output_file(path) as tmp:
+        tmp.write_text(json.dumps(data, indent=2, allow_nan=False) + "\n")
+
+
+def convert(job, output, threads):
+    started = monotonic()
+    label, mode = job["id"], job["mode"]
+    target = output / (label + ".h5")
+    receipt = output / ".batch" / (label + ".json")
+    try:
+        with threadpool_limits(limits=threads):
+            files = input_paths(job)
+            stamps = [stamp(p) for p in files]
+            signature = {
+                "version": __version__,
+                "mode": mode,
+                "options": job["options"],
+                "backend": radial_backend(),
+                "inputs": [
+                    (str(p), hash_at_stamp(p, st)) for p, st in zip(files, stamps)
+                ],
+            }
+            # Keep role assignments even if several directories share the same inputs.
+            signature["directories"] = {
+                k: str(job[k])
+                for k in ("run", "reference", "potential_run")
+                if k in job
+            }
+            key = hashlib.sha256(
+                json.dumps(signature, sort_keys=True, allow_nan=False).encode()
+            ).hexdigest()
+            if target.exists():
+                try:
+                    saved = json.loads(receipt.read_text())
+                except (FileNotFoundError, ValueError):
+                    saved = {}
+                if not isinstance(saved, dict):
+                    saved = {}
+                try:
+                    with h5py.File(target) as f:
+                        if f.attrs.get("batch_id") != label:
+                            raise ValueError(
+                                f"Output already exists and is not owned by this batch: {target}"
+                            )
+                        same = (
+                            f.attrs.get("batch_signature") == key
+                            and f.attrs.get("format") == SPARSE_FORMAT
+                        )
+                except OSError:
+                    if saved.get("id") != label or saved.get("model") != target.name:
+                        raise
+                    same = False
+                if (
+                    same
+                    and saved.get("signature") == key
+                    and file_sha256(target) == saved.get("sha256")
+                ):
+                    if files != input_paths(job) or stamps != [stamp(p) for p in files]:
+                        raise ValueError("Input changed during resume check")
+                    return {
+                        **saved,
+                        "status": "skipped",
+                        "seconds": monotonic() - started,
+                    }
+            with output_file(target) as tmp:
+                if mode == "validated":
+                    report = reconstruct(
+                        job["run"],
+                        job["registry"],
+                        job["reference"],
+                        tmp,
+                        potential_run=job["potential_run"],
+                        **job["options"],
+                    )
+                    metrics = {
+                        k: report[k]
+                        for k in ("rmse_eV", "max_error_eV", "observations")
+                    }
+                else:
+                    options = job["options"].copy()
+                    cutoff = options.pop("cutoff", None)
+                    with TemporaryDirectory(dir=output) as d:
+                        dense = Path(d) / "projection.h5"
+                        build(job["run"], job["registry"], dense, **options)
+                        sparsify(dense, tmp, cutoff=cutoff)
+                    metrics = {}
+                with h5py.File(tmp, "r+") as f:
+                    f.attrs.update(
+                        batch_id=label,
+                        batch_mode=mode,
+                        batch_signature=key,
+                        radial_backend=signature["backend"],
+                    )
+                if files != input_paths(job) or stamps != [stamp(p) for p in files]:
+                    raise ValueError("Input changed during conversion")
+                result = {
+                    "id": label,
+                    "mode": mode,
+                    "status": "converted",
+                    "model": target.name,
+                    "signature": key,
+                    "sha256": file_sha256(tmp),
+                    "seconds": monotonic() - started,
+                    **metrics,
+                }
+            write_json(receipt, result)
+            return result
+    except Exception as exc:
+        return {
+            "id": label,
+            "mode": mode,
+            "status": "failed",
+            "error": f"{type(exc).__name__}: {exc}",
+            "seconds": monotonic() - started,
+        }
+
+
+def run_batch(manifest, output, workers=1, threads=1, check_only=False):
+    import fcntl
+
+    if workers < 1 or threads < 1:
+        raise ValueError("Worker and thread counts must be positive")
+    jobs = read_jobs(manifest)
+    with h5py.File(jobs[0]["registry"]) as registry:
+        if registry.attrs.get("format") != REGISTRY_FORMAT:
+            raise ValueError("Batch conversion requires a frozen AO registry")
+    output = Path(output).resolve()
+    output.mkdir(parents=True, exist_ok=True)
+    state = output / ".batch"
+    state.mkdir(exist_ok=True)
+    summary_file = output / ("preflight.json" if check_only else "summary.json")
+    # Reserve all destinations before writing, including inputs referenced by other jobs.
+    destinations = [summary_file, state / "lock"]
+    for job in jobs:
+        destinations.extend(
+            [output / (job["id"] + ".h5"), state / (job["id"] + ".json")]
+        )
+    protected = {
+        Path(manifest).resolve(),
+        *(p.resolve() for job in jobs for p in input_paths(job)),
+    }
+    if any(p.is_symlink() or p.resolve() in protected for p in destinations):
+        raise ValueError("A batch destination is a symlink or collides with an input")
+    with (state / "lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        results = {}
+        write_json(summary_file, {"status": "running", "total": len(jobs)})
+
+        def record(result):
+            results[result["id"]] = result
+            print(
+                f"[{len(results)}/{len(jobs)}] {result['id']} {result['status']} {result.get('error', '')}",
+                file=sys.stderr,
+                flush=True,
+            )
+
+        if check_only:
+            for job in jobs:
+                try:
+                    for p in input_paths(job):
+                        stamp(p)
+                    record({"id": job["id"], "status": "ready"})
+                except (OSError, ValueError) as exc:
+                    record({"id": job["id"], "status": "failed", "error": str(exc)})
+        else:
+            pool = ProcessPoolExecutor(
+                max_workers=min(workers, len(jobs)),
+                mp_context=multiprocessing.get_context("spawn"),
+            )
+            try:
+                futures = {
+                    pool.submit(convert, job, output, threads): job["id"]
+                    for job in jobs
+                }
+                for future in as_completed(futures):
+                    try:
+                        result = future.result()
+                    except Exception as exc:
+                        result = {
+                            "id": futures[future],
+                            "status": "failed",
+                            "error": str(exc),
+                        }
+                    record(result)
+            finally:
+                pool.shutdown(wait=True, cancel_futures=True)
+        rows = [results[job["id"]] for job in jobs]
+        summary = {
+            "status": "failed"
+            if any(r["status"] == "failed" for r in rows)
+            else "complete",
+            "mode": jobs[0]["mode"],
+            "check_only": check_only,
+            "jobs": rows,
+        }
+        write_json(summary_file, summary)
+        return summary

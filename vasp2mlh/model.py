@@ -8,9 +8,33 @@ from scipy.linalg import block_diag, cho_factor, cho_solve, eigvalsh
 from .basis import harmonics
 
 
-def ao_and_metric(q, atoms, basis, pots, spline):
+class RadialTable:
+    """Reuse exact rounded reciprocal radii across k points of one fixed basis."""
+
+    def __init__(self, basis):
+        self.shells = [shell for shells in basis.values() for shell in shells]
+        self.values = {}
+        self.capacity = max(1, min(65536, 2**20 // len(self.shells)))
+
+    def evaluate(self, lengths):
+        radii, inverse = np.unique(np.round(lengths, 12), return_inverse=True)
+        keys = radii.tolist()
+        missing = np.array([q for q in keys if q not in self.values])
+        if len(missing):
+            fresh = np.column_stack(
+                [sh.transform_unique(missing) for sh in self.shells]
+            )
+            self.values.update(zip(missing.tolist(), fresh))
+        table = np.stack([self.values[q] for q in keys])[inverse]
+        if len(self.values) > self.capacity:
+            self.values.clear()
+        return {id(sh): table[:, i] for i, sh in enumerate(self.shells)}
+
+
+def ao_and_metric(q, atoms, basis, pots, spline, radial_table=None):
     """Return AO columns and low-rank PAW overlap update S_pw = I + P D P†."""
     lengths = np.linalg.norm(q, axis=1)
+    radial = radial_table.evaluate(lengths) if radial_table is not None else {}
     volume = atoms.get_volume()
     atom_types = atoms.get_chemical_symbols()
     prototypes = {}
@@ -22,7 +46,13 @@ def ao_and_metric(q, atoms, basis, pots, spline):
             for l in set(pot.ls + [s.l for s in shells])
         }
         aos = np.column_stack(
-            [s.transform(lengths)[:, None] * angular[s.l] for s in shells]
+            [
+                (radial[id(s)] if radial_table is not None else s.transform(lengths))[
+                    :, None
+                ]
+                * angular[s.l]
+                for s in shells
+            ]
         )
         projs = np.column_stack(
             [

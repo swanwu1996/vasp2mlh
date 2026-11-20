@@ -13,7 +13,14 @@ from scipy.linalg import block_diag, eigvalsh
 
 from .realspace import matrices_k, SPARSE_FORMAT
 from .basis import load_basis, read_potcar
-from .model import ao_and_metric, project, mesh_indices, localized_transform, bloch
+from .model import (
+    RadialTable,
+    ao_and_metric,
+    project,
+    mesh_indices,
+    localized_transform,
+    bloch,
+)
 from .vasp import Wavecar, plane_waves, metadata
 
 
@@ -97,6 +104,7 @@ def build(run, config, output, mesh=None, complement=0.0, potential_run=None):
     norb = sum(2 * l + 1 for s in symbols for l in ls[s])
     dim = norb * (2 if meta["spinor"] else 1)
     hs = np.empty((w.ns, w.nk, dim, dim), complex)
+    radial_table = RadialTable(basis)
     ss = np.empty((w.nk, norb, norb), complex)
     spectral_shape = (w.ns, w.nk, w.nb)
     energies, occupations, weights = (np.empty(spectral_shape) for _ in range(3))
@@ -121,7 +129,7 @@ def build(run, config, output, mesh=None, complement=0.0, potential_run=None):
                     points[ik] = point
                     q = plane_waves(point, w.cell, w.encut)
                     ao, p, d = ao_and_metric(
-                        q, atoms, basis, potentials, meta["spline"]
+                        q, atoms, basis, potentials, meta["spline"], radial_table
                     )
                 if len(coeff) != len(q) * (2 if meta["spinor"] else 1):
                     raise ValueError(
