@@ -34,6 +34,26 @@ def metadata(path):
             raise ValueError(f"Missing VASP XML parameter {name}")
         return value.strip()
 
+    operator_names = {
+        "GGA",
+        "METAGGA",
+        "LHFCALC",
+        "LDAU",
+        "LASPH",
+        "LMAXMIX",
+        "XC",
+        "NGX",
+        "NGY",
+        "NGZ",
+        "NGXF",
+        "NGYF",
+        "NGZF",
+    }
+    operator_parameters = {
+        node.attrib["name"].strip(): (node.text or "").strip().upper()
+        for node in params.iter()
+        if node.attrib.get("name", "").strip() in operator_names
+    }
     types = root.findall("./atominfo/array[@name='atomtypes']/set/rc")
     neutral = sum(int(row[0].text) * float(row[3].text) for row in types)
     titles = {row[1].text.strip(): row[4].text.strip() for row in types}
@@ -41,6 +61,7 @@ def metadata(path):
     calcs = root.findall("./calculation")
     last = calcs[-1]
     return dict(
+        operator_parameters=operator_parameters,
         atoms=Atoms(atoms, scaled_positions=frac, cell=cell, pbc=True),
         kpoints=table(root, "./kpoints/varray[@name='kpointlist']"),
         weights=table(root, "./kpoints/varray[@name='weights']").ravel(),

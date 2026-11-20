@@ -38,7 +38,7 @@ def file_sha256(path):
     return digest.hexdigest()
 
 
-def build(run, config, output, mesh=None, complement=0.0):
+def build(run, config, output, mesh=None, complement=0.0, potential_run=None):
     if not np.isfinite(complement):
         raise ValueError("Complement energy must be finite")
     run = Path(run)
@@ -75,6 +75,24 @@ def build(run, config, output, mesh=None, complement=0.0):
         meta["titles"][s].split() != potentials[s].title.split() for s in set(symbols)
     ):
         raise ValueError("POTCAR title differs from vasprun.xml")
+    operator = None
+    if potential_run is not None:
+        from .operator import ScalarOperator
+
+        if complement != 0:
+            raise ValueError(
+                "A complement energy applies only to finite-band projection"
+            )
+        if not (run / "CHGCAR").stat().st_size:
+            raise ValueError("Direct projection requires the reference charge density")
+        for name in ("POTCAR", "CHGCAR"):
+            if file_sha256(run / name) != file_sha256(Path(potential_run) / name):
+                raise ValueError(
+                    f"Direct operator input {name} differs from the source run"
+                )
+        operator = ScalarOperator(potential_run, meta, potentials)
+        rayleigh_error = []
+        residual_norm = []
     ls = {s: [sh.l for sh in shells] for s, shells in basis.items()}
     norb = sum(2 * l + 1 for s in symbols for l in ls[s])
     dim = norb * (2 if meta["spinor"] else 1)
@@ -117,6 +135,30 @@ def build(run, config, output, mesh=None, complement=0.0):
                     weights[spin, ik],
                     gram[spin, ik],
                 ) = project(ao, p, d, coeff, bands[:, 0], meta["spinor"], complement)
+                if operator is not None:
+                    if not np.allclose(d, operator.blocks["qij"], atol=2e-5, rtol=0):
+                        raise ValueError(
+                            "POTCAR and exported PAW augmentation matrices disagree"
+                        )
+                    mat = ao.conj().T @ operator.apply(q, point, w.cell, p, ao)
+                    hs[spin, ik] = (mat + mat.conj().T) / 2
+                    nocc = int(np.ceil(meta["nelect"] / 2))
+                    edge = slice(max(0, nocc - 2), min(w.nb, nocc + 2))
+                    ce = coeff[:, edge]
+                    hce = operator.apply(q, point, w.cell, p, ce)
+                    sce = ce + p @ (d @ (p.conj().T @ ce))
+                    residual = hce - sce * bands[edge, 0]
+                    residual_norm.append(float(np.linalg.norm(residual, axis=0).max()))
+                    rayleigh_error.append(
+                        float(np.abs((ce.conj() * residual).sum(axis=0)).max())
+                    )
+        if operator is not None:
+            f["k/operator_edge_rayleigh_error_eV"] = rayleigh_error
+            f["k/operator_edge_residual_norm_eV"] = residual_norm
+            f.attrs["hamiltonian_method"] = "direct_scalar_paw"
+            f.attrs["potential_sha256"] = file_sha256(
+                Path(potential_run) / "vaspout.h5"
+            )
         counts = [sum(2 * l + 1 for l in ls[s]) for s in symbols]
         r, hr, sr = localized_transform(points, mesh, atoms, counts, hs, ss)
         for name, value in {

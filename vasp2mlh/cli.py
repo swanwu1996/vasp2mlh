@@ -30,6 +30,39 @@ def main():
         default=0.0,
         help="energy assigned to unresolved spectral weight",
     )
+    make.add_argument(
+        "--potential-run",
+        help="matching scalar VASP run with WRT_POTENTIAL = total paw",
+    )
+    fit = subs.add_parser(
+        "calibrate",
+        help="calibrate direct-operator Ritz energies to the source VASP mesh with geometry-only AO overlap",
+    )
+    fit.add_argument("model")
+    fit.add_argument("overlap")
+    fit.add_argument("output")
+    fit.add_argument(
+        "--bands",
+        type=int,
+        help="full correction through this band, taper above (default: occupied + 8)",
+    )
+    fit.add_argument(
+        "--alignment-width",
+        type=float,
+        default=1.0,
+        help="Gaussian Ritz alignment width in eV; zero preserves Ritz eigenvectors",
+    )
+    ov = subs.add_parser(
+        "overlap",
+        help="compute ordinary AO overlap blocks from structure and radial functions alone",
+    )
+    ov.add_argument("structure")
+    ov.add_argument("basis")
+    ov.add_argument("output")
+    ov.add_argument(
+        "--potcar", help="only for basis specifications using POTCAR radial shells"
+    )
+    ov.add_argument("--order", type=int, default=48)
     sparse = subs.add_parser(
         "sparsify", help="write a validated Hermitian block-sparse H/S pair archive"
     )
@@ -136,7 +169,21 @@ def main():
     view.add_argument("-o", "--output", required=True)
     args = parser.parse_args()
     try:
-        if args.command == "compare":
+        if args.command == "calibrate":
+            from .calibrate import calibrate
+
+            calibrate(
+                args.model,
+                args.overlap,
+                args.output,
+                args.bands,
+                width=args.alignment_width,
+            )
+        elif args.command == "overlap":
+            from .overlap import overlap
+
+            overlap(args.structure, args.basis, args.output, args.potcar, args.order)
+        elif args.command == "compare":
             result = compare_path(
                 args.model, args.vasp_xml, args.openmx_band, args.edge_bands
             )
@@ -152,7 +199,14 @@ def main():
 
             downfold(args.model, args.output, args.bands, args.min_weight)
         elif args.command == "build":
-            build(args.run, args.basis, args.output, args.mesh, args.complement_eV)
+            build(
+                args.run,
+                args.basis,
+                args.output,
+                args.mesh,
+                args.complement_eV,
+                args.potential_run,
+            )
         elif args.command == "sparsify":
             extra = (
                 np.loadtxt(args.check_points, ndmin=2) if args.check_points else None

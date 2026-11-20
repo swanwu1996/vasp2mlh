@@ -75,6 +75,7 @@ def sparsify(
                 "Spinless time reversal requires a nonmagnetic scalar model in a real AO basis"
             )
         imag_h = imag_s = 0.0
+        geometry_overlap = src.attrs.get("metric") == "ordinary"
         atoms = structure(src)
         pairs = {key: (h, s) for key, h, s in pair_blocks(src)}
         keys, hs, ss = [], [], []
@@ -101,16 +102,19 @@ def sparsify(
                 - atoms.positions[i]
                 + np.array([x, y, z]) @ atoms.cell
             )
-            # Reject a whole bond with its reverse. Both operators use one support;
-            # the Frobenius criteria respect rotations within each local AO space.
+            # Apply the same pruning decision to a bond and its Hermitian reverse.
             if key != peer and (
                 (cutoff is not None and np.linalg.norm(dr) > cutoff + 1e-10)
                 or (
                     max(np.linalg.norm(channel) for channel in h) <= h_tol
-                    and np.linalg.norm(s) <= s_tol
+                    and (geometry_overlap or np.linalg.norm(s) <= s_tol)
                 )
             ):
-                continue
+                if geometry_overlap and np.any(s):
+                    # Geometry determines S even when the H block is truncated.
+                    h = np.zeros_like(h)
+                else:
+                    continue
             keys.append(key)
             hs.append(h.reshape(len(h), -1))
             ss.append(s.ravel())
@@ -133,6 +137,14 @@ def sparsify(
                 "k/projectability",
             ):
                 src.copy(name, out.require_group("k") if name.startswith("k/") else out)
+            if "calibration" in src:
+                src.copy("calibration", out)
+            for diagnostic in (
+                "k/operator_edge_rayleigh_error_eV",
+                "k/operator_edge_residual_norm_eV",
+            ):
+                if diagnostic in src:
+                    src.copy(diagnostic, out["k"])
             out["pairs/indices"] = keys
             out["pairs/offsets"] = np.r_[0, np.cumsum([len(s) for s in ss])]
             out["pairs/H"] = np.concatenate(hs, axis=1)
@@ -141,6 +153,7 @@ def sparsify(
                 band_range_1based=band_range,
                 source_directed_pairs=len(pairs),
                 stored_unique_pairs=len(keys),
+                stored_nonzero_H_blocks=sum(bool(np.any(h)) for h in hs),
                 retained_directed_pairs=2 * len(keys) - len(atoms),
                 source_pair_hermiticity_H_eV=asym_h,
                 source_pair_hermiticity_S=asym_s,
