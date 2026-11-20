@@ -1,5 +1,7 @@
 import argparse
 import json
+import os
+import sys
 from pathlib import Path
 from xml.etree.ElementTree import ParseError
 
@@ -13,9 +15,11 @@ from .export import deeph, deeph_batch, hamgnn
 from .pipeline import bands, build, validate, output_file
 
 
-def main():
+def make_parser():
     parser = argparse.ArgumentParser(
-        prog="vasp2mlh", description="VASP WAVECAR to PAW-metric AO Hamiltonians"
+        prog="vasp2mlh",
+        epilog="Run a JSON/TOML control file with: vasp2mlh path/to/config.toml",
+        description="VASP WAVECAR to PAW-metric AO Hamiltonians",
     )
     from . import __version__
 
@@ -30,16 +34,13 @@ def main():
     bulk.add_argument(
         "manifest", help="JSON job list, with paths relative to the manifest"
     )
-    bulk.add_argument("output", help="batch output directory")
-    bulk.add_argument(
-        "--workers", type=int, default=1, help="number of concurrent structures"
-    )
-    bulk.add_argument(
-        "--threads", type=int, default=1, help="BLAS/OpenMP threads per worker"
-    )
+    bulk.add_argument("output", nargs="?", help="batch output directory")
+    bulk.add_argument("--workers", type=int, help="number of concurrent structures")
+    bulk.add_argument("--threads", type=int, help="BLAS/OpenMP threads per worker")
     bulk.add_argument(
         "--check-only",
         action="store_true",
+        default=None,
         help="check required file presence and size without conversion",
     )
     release = subs.add_parser(
@@ -123,6 +124,7 @@ def main():
         help="show the independent validation report embedded in a reconstructed band model",
     )
     report.add_argument("model")
+    report.add_argument("--output", help="write the embedded validation report to JSON")
     gen = subs.add_parser(
         "basis-generate",
         help="generate a raw PAW reference or a compact multi-zeta AO registry",
@@ -349,197 +351,54 @@ def main():
     )
     view.add_argument("comparisons", nargs="+")
     view.add_argument("-o", "--output", required=True)
-    args = parser.parse_args()
+    return parser, subs.choices
+
+
+def main(argv=None):
+    from contextlib import ExitStack
+    from threadpoolctl import threadpool_limits
+    from .configuration import (
+        backend_setting,
+        load_config,
+        operation_args,
+        runtime_controls,
+    )
+
+    parser, commands = make_parser()
+    argv = sys.argv[1:] if argv is None else argv
     try:
-        if args.command == "convert-batch":
-            from .batch import run_batch
-
-            summary = run_batch(
-                args.manifest, args.output, args.workers, args.threads, args.check_only
-            )
-            if summary["status"] == "failed":
-                parser.exit(1, "Some jobs failed; see the batch report.\n")
-        elif args.command == "reconstruct-bands":
-            from .band_release import reconstruct
-
-            options = vars(args).copy()
-            del options["command"]
-            print(json.dumps(reconstruct(**options), indent=2))
-        elif args.command == "band-report":
-            with h5py.File(args.model) as f:
-                print(
-                    json.dumps(
-                        json.loads(f["band_validation"].attrs["report"]), indent=2
+        with ExitStack() as stack:
+            if len(argv) == 1 and Path(argv[0]).suffix.lower() in (".json", ".toml"):
+                path = Path(argv[0]).resolve()
+                config = load_config(path)
+                command = config.get("command", "convert-batch")
+                if command == "convert-batch":
+                    args = parser.parse_args(["convert-batch", str(path)])
+                else:
+                    if (
+                        not isinstance(command, str)
+                        or command not in commands
+                        or config.keys() - {"command", "parameters", "runtime"}
+                    ):
+                        raise ValueError("Unknown command or configuration field")
+                    settings = runtime_controls(config, batch=False)
+                    args = operation_args(
+                        command, commands[command], config.get("parameters", {})
                     )
-                )
-        elif args.command == "basis-generate":
-            from .atomic import generate
-
-            generate(args.output, args.potcar, args.layout)
-        elif args.command == "basis-optimize":
-            from .spillage import optimize
-
-            print(
-                json.dumps(
-                    optimize(args.run, args.registry, args.config, args.output),
-                    indent=2,
-                )
-            )
-        elif args.command == "basis-freeze":
-            from .registry import freeze
-
-            freeze(args.config, args.output, args.potcar)
-        elif args.command == "basis-check":
-            from .registry import audit
-
-            print(json.dumps(audit(args.models, args.registry), indent=2))
-        elif args.command == "deeph-batch":
-            deeph_batch(args.models, args.output, args.basis_lock)
-        elif args.command == "calibrate":
-            from .calibrate import calibrate
-
-            calibrate(
-                args.model,
-                args.overlap,
-                args.output,
-                args.bands,
-                width=args.alignment_width,
-            )
-        elif args.command == "filter":
-            from .filtering import filter_model
-
-            filter_model(
-                args.model,
-                args.overlap,
-                args.output,
-                args.centre_offset,
-                args.width,
-                args.floor,
-                args.taper,
-            )
-        elif args.command == "overlap":
-            from .overlap import overlap
-
-            overlap(args.structure, args.basis, args.output, args.potcar, args.order)
-        elif args.command == "compare":
-            result = compare_path(
-                args.model, args.vasp_xml, args.openmx_band, args.edge_bands
-            )
-            result["title"] = args.title or result["formula"]
-            write_comparison(result, args.output)
-            print(json.dumps(result["errors"], indent=2))
-        elif args.command == "view":
-            from .viewer import render
-
-            render(args.comparisons, args.output)
-        elif args.command == "downfold":
-            from .downfold import downfold
-
-            downfold(args.model, args.output, args.bands, args.min_weight)
-        elif args.command == "build":
-            build(
-                args.run,
-                args.basis,
-                args.output,
-                args.mesh,
-                args.complement_eV,
-                args.potential_run,
-            )
-        elif args.command == "sparsify":
-            extra = (
-                np.loadtxt(args.check_points, ndmin=2) if args.check_points else None
-            )
-            print(
-                json.dumps(
-                    sparsify(
-                        args.model,
-                        args.output,
-                        args.cutoff,
-                        args.h_tol,
-                        args.s_tol,
-                        args.max_band_change,
-                        extra,
-                        args.band_range,
-                        args.spinless_time_reversal,
-                        relative_pruning=args.relative_pruning,
-                    ),
-                    indent=2,
-                )
-            )
-        elif args.command == "validate":
-            report = validate(args.model)
-            if args.lobsterout:
-                report["lobster"] = lobster_summary(args.lobsterout)
-            if args.reference_xml:
-                report["held_out"] = held_out(args.model, args.reference_xml)
-            print(json.dumps(report, indent=2))
-        elif args.command == "deeph":
-            deeph(args.model, args.destination, args.basis_lock)
-        elif args.command == "hamgnn":
-            hamgnn(args.models, args.output, args.nao_max, args.basis_lock)
-        elif args.command == "bands":
-            if Path(args.output).resolve() in {
-                Path(args.model).resolve(),
-                Path(args.points).resolve(),
-            }:
-                raise ValueError("Band output collides with the model or k-point input")
-            k = np.loadtxt(args.points, ndmin=2)
-            if k.shape[1] != 3 or not np.isfinite(k).all():
-                raise ValueError("Expected finite fractional k-point triples")
-            with h5py.File(args.model) as f:
-                e = bands(f, k)
-                if args.validated_window:
-                    profile = json.loads(f["band_validation"].attrs["report"])
-                    values = e[0]
-                    br = profile["band_range_1based"]
-                    if br is None:
-                        lo, hi = profile["energy_window_absolute_eV"]
-                        if np.any(values[:, -1] <= hi):
-                            raise ValueError(
-                                "AO spectrum does not extend above the declared window at all query points"
-                            )
-                        mask = (values >= lo) & (values <= hi)
-                    else:
-                        mask = np.zeros(values.shape, dtype=bool)
-                        mask[:, br[0] - 1 : br[1]] = True
-                    ki, bi = np.nonzero(mask)
-                    with output_file(args.output) as tmp:
-                        np.savetxt(
-                            tmp,
-                            np.column_stack((k[ki], bi + 1, values[ki, bi])),
-                            header="kx ky kz band_1based energy_eV",
+                    stack.callback(os.chdir, Path.cwd())
+                    os.chdir(path.parent)
+                    for name in ("output", "destination"):
+                        dest = getattr(args, name, None)
+                        if dest is not None and Path(dest).resolve() == path:
+                            raise ValueError("Output collides with control file")
+                    stack.enter_context(backend_setting(settings.get("backend")))
+                    if "threads" in settings:
+                        stack.enter_context(
+                            threadpool_limits(limits=settings["threads"])
                         )
-                    return
-            with output_file(args.output) as tmp:
-                np.savetxt(
-                    tmp,
-                    np.vstack(
-                        [
-                            np.column_stack((k, np.full(len(k), s), v))
-                            for s, v in enumerate(e)
-                        ]
-                    ),
-                    header="kx ky kz spin band_energies_eV",
-                )
-        elif args.command == "dos":
-            axis, dos, labels, pop = spectra(
-                args.model, *args.window, args.step, args.sigma
-            )
-            with output_file(args.output) as tmp:
-                np.savetxt(
-                    tmp,
-                    np.column_stack((axis, dos)),
-                    header="E_minus_Ef_eV VASP_DOS AO_model_DOS " + " ".join(labels),
-                )
-            print(json.dumps(dict(zip(labels, pop)), indent=2))
-        elif args.command == "locality":
-            with output_file(args.output) as tmp:
-                np.savetxt(
-                    tmp,
-                    locality(args.model),
-                    header="Rx Ry Rz i j distance_A H_frobenius_eV S_frobenius",
-                    fmt=["%d"] * 5 + ["%.10g"] * 3,
-                )
+            else:
+                args = parser.parse_args(argv)
+            return execute(parser, args)
     except (
         ValueError,
         ParseError,
@@ -550,3 +409,196 @@ def main():
         np.linalg.LinAlgError,
     ) as exc:
         parser.exit(2, f"vasp2mlh: {exc}\n")
+
+
+def execute(parser, args):
+    if args.command == "convert-batch":
+        from .batch import run_batch
+
+        summary = run_batch(
+            args.manifest, args.output, args.workers, args.threads, args.check_only
+        )
+        if summary["status"] == "failed":
+            parser.exit(1, "Some jobs failed; see the batch report.\n")
+    elif args.command == "reconstruct-bands":
+        from .band_release import reconstruct
+
+        options = vars(args).copy()
+        del options["command"]
+        print(json.dumps(reconstruct(**options), indent=2))
+    elif args.command == "band-report":
+        with h5py.File(args.model) as f:
+            report = json.loads(f["band_validation"].attrs["report"])
+        if args.output:
+            if Path(args.output).resolve() == Path(args.model).resolve():
+                raise ValueError("Report output collides with model")
+            with output_file(args.output) as tmp:
+                tmp.write_text(json.dumps(report, indent=2) + "\n")
+        else:
+            print(json.dumps(report, indent=2))
+    elif args.command == "basis-generate":
+        from .atomic import generate
+
+        generate(args.output, args.potcar, args.layout)
+    elif args.command == "basis-optimize":
+        from .spillage import optimize
+
+        print(
+            json.dumps(
+                optimize(args.run, args.registry, args.config, args.output),
+                indent=2,
+            )
+        )
+    elif args.command == "basis-freeze":
+        from .registry import freeze
+
+        freeze(args.config, args.output, args.potcar)
+    elif args.command == "basis-check":
+        from .registry import audit
+
+        print(json.dumps(audit(args.models, args.registry), indent=2))
+    elif args.command == "deeph-batch":
+        deeph_batch(args.models, args.output, args.basis_lock)
+    elif args.command == "calibrate":
+        from .calibrate import calibrate
+
+        calibrate(
+            args.model,
+            args.overlap,
+            args.output,
+            args.bands,
+            width=args.alignment_width,
+        )
+    elif args.command == "filter":
+        from .filtering import filter_model
+
+        filter_model(
+            args.model,
+            args.overlap,
+            args.output,
+            args.centre_offset,
+            args.width,
+            args.floor,
+            args.taper,
+        )
+    elif args.command == "overlap":
+        from .overlap import overlap
+
+        overlap(args.structure, args.basis, args.output, args.potcar, args.order)
+    elif args.command == "compare":
+        result = compare_path(
+            args.model, args.vasp_xml, args.openmx_band, args.edge_bands
+        )
+        result["title"] = args.title or result["formula"]
+        write_comparison(result, args.output)
+        print(json.dumps(result["errors"], indent=2))
+    elif args.command == "view":
+        from .viewer import render
+
+        render(args.comparisons, args.output)
+    elif args.command == "downfold":
+        from .downfold import downfold
+
+        downfold(args.model, args.output, args.bands, args.min_weight)
+    elif args.command == "build":
+        build(
+            args.run,
+            args.basis,
+            args.output,
+            args.mesh,
+            args.complement_eV,
+            args.potential_run,
+        )
+    elif args.command == "sparsify":
+        extra = np.loadtxt(args.check_points, ndmin=2) if args.check_points else None
+        print(
+            json.dumps(
+                sparsify(
+                    args.model,
+                    args.output,
+                    args.cutoff,
+                    args.h_tol,
+                    args.s_tol,
+                    args.max_band_change,
+                    extra,
+                    args.band_range,
+                    args.spinless_time_reversal,
+                    relative_pruning=args.relative_pruning,
+                ),
+                indent=2,
+            )
+        )
+    elif args.command == "validate":
+        report = validate(args.model)
+        if args.lobsterout:
+            report["lobster"] = lobster_summary(args.lobsterout)
+        if args.reference_xml:
+            report["held_out"] = held_out(args.model, args.reference_xml)
+        print(json.dumps(report, indent=2))
+    elif args.command == "deeph":
+        deeph(args.model, args.destination, args.basis_lock)
+    elif args.command == "hamgnn":
+        hamgnn(args.models, args.output, args.nao_max, args.basis_lock)
+    elif args.command == "bands":
+        if Path(args.output).resolve() in {
+            Path(args.model).resolve(),
+            Path(args.points).resolve(),
+        }:
+            raise ValueError("Band output collides with the model or k-point input")
+        k = np.loadtxt(args.points, ndmin=2)
+        if k.shape[1] != 3 or not np.isfinite(k).all():
+            raise ValueError("Expected finite fractional k-point triples")
+        with h5py.File(args.model) as f:
+            e = bands(f, k)
+            if args.validated_window:
+                profile = json.loads(f["band_validation"].attrs["report"])
+                values = e[0]
+                br = profile["band_range_1based"]
+                if br is None:
+                    lo, hi = profile["energy_window_absolute_eV"]
+                    if np.any(values[:, -1] <= hi):
+                        raise ValueError(
+                            "AO spectrum does not extend above the declared window at all query points"
+                        )
+                    mask = (values >= lo) & (values <= hi)
+                else:
+                    mask = np.zeros(values.shape, dtype=bool)
+                    mask[:, br[0] - 1 : br[1]] = True
+                ki, bi = np.nonzero(mask)
+                with output_file(args.output) as tmp:
+                    np.savetxt(
+                        tmp,
+                        np.column_stack((k[ki], bi + 1, values[ki, bi])),
+                        header="kx ky kz band_1based energy_eV",
+                    )
+                return
+        with output_file(args.output) as tmp:
+            np.savetxt(
+                tmp,
+                np.vstack(
+                    [
+                        np.column_stack((k, np.full(len(k), s), v))
+                        for s, v in enumerate(e)
+                    ]
+                ),
+                header="kx ky kz spin band_energies_eV",
+            )
+    elif args.command == "dos":
+        axis, dos, labels, pop = spectra(
+            args.model, *args.window, args.step, args.sigma
+        )
+        with output_file(args.output) as tmp:
+            np.savetxt(
+                tmp,
+                np.column_stack((axis, dos)),
+                header="E_minus_Ef_eV VASP_DOS AO_model_DOS " + " ".join(labels),
+            )
+        print(json.dumps(dict(zip(labels, pop)), indent=2))
+    elif args.command == "locality":
+        with output_file(args.output) as tmp:
+            np.savetxt(
+                tmp,
+                locality(args.model),
+                header="Rx Ry Rz i j distance_A H_frobenius_eV S_frobenius",
+                fmt=["%d"] * 5 + ["%.10g"] * 3,
+            )

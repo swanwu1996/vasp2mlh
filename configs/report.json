@@ -1,0 +1,4 @@
+{
+  "command": "band-report",
+  "parameters": {"model": "models/s0001.h5", "output": "validation.json"}
+}

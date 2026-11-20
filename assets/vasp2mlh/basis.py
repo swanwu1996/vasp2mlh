@@ -3,7 +3,6 @@
 from dataclasses import InitVar, dataclass
 from pathlib import Path
 import hashlib
-import json
 import os
 import re
 
@@ -13,6 +12,7 @@ from scipy.integrate import simpson
 from scipy.interpolate import CubicSpline
 from scipy.special import sph_harm_y, spherical_jn
 
+from .configuration import load_config
 from .vasp import BOHR
 
 
@@ -215,7 +215,7 @@ def load_basis(config, potentials, elements=None):
         from .registry import read_registry
 
         return read_registry(path, elements, potentials)
-    specs = json.loads(path.read_text())
+    specs = load_config(path)
     basis = {}
     for symbol, shells in specs.items():
         basis[symbol] = []

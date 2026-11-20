@@ -1,0 +1,5 @@
+command = "basis-generate"
+[parameters]
+output = "basis.h5"
+potcar = ["calculations/s0001/mesh/POTCAR"]
+layout = "layout.toml"

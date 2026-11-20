@@ -1,0 +1,5 @@
+command = "deeph-batch"
+[parameters]
+models = ["models/s0001.h5"]
+basis_lock = "basis.h5"
+output = "deeph-input"

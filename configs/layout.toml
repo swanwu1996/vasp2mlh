@@ -1,0 +1,4 @@
+# Example element. Use the actual elements and validated radial ranges of your PAW data.
+[Si]
+cutoff_A = 2.5
+multiplicities = [2, 2, 1]

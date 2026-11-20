@@ -1,0 +1,6 @@
+command = "bands"
+[parameters]
+model = "models/s0001.h5"
+points = "path.kpts"
+output = "bands.dat"
+validated_window = true

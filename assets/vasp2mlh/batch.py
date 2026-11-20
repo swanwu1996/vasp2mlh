@@ -17,15 +17,16 @@ from threadpoolctl import threadpool_limits
 from . import __version__
 from .band_release import reconstruct
 from .basis import radial_backend
+from .configuration import backend_setting, load_config, runtime_controls
 from .pipeline import build, file_sha256, output_file
 from .realspace import SPARSE_FORMAT
 from .registry import FORMAT as REGISTRY_FORMAT
 from .sparse import sparsify
 
 
-def read_jobs(manifest):
+def read_jobs(manifest, config=None):
     manifest = Path(manifest).resolve()
-    config = json.loads(manifest.read_text())
+    config = load_config(manifest) if config is None else config
     if not isinstance(config, dict) or not isinstance(config.get("jobs"), list):
         raise ValueError("Manifest must be an object with a jobs array")
     if not isinstance(config.get("defaults", {}), dict):
@@ -50,7 +51,8 @@ def read_jobs(manifest):
     if (
         not isinstance(mode, str)
         or mode not in modes
-        or config.keys() - {"mode", "registry", "defaults", "jobs"}
+        or config.keys()
+        - {"command", "mode", "registry", "defaults", "jobs", "runtime", "output"}
     ):
         raise ValueError("Invalid batch mode or unknown top-level manifest field")
 
@@ -86,6 +88,21 @@ def read_jobs(manifest):
             raise ValueError(
                 f"Job {label} needs cutoff, both tolerances and exactly one window"
             )
+        for key, value in options.items():
+            if key in ("mesh", "band_range", "energy_window"):
+                size = 3 if key == "mesh" else 2
+                kinds = (int, float) if key == "energy_window" else (int,)
+                if (
+                    not isinstance(value, list)
+                    or len(value) != size
+                    or any(type(v) not in kinds for v in value)
+                ):
+                    raise ValueError(f"Invalid {key} array for job {label}")
+            elif key == "relative_pruning":
+                if type(value) is not bool:
+                    raise ValueError(f"{key} must be true or false")
+            elif type(value) not in (int, float):
+                raise ValueError(f"{key} must be numeric for job {label}")
         job = {
             "id": label,
             "mode": mode,
@@ -141,13 +158,13 @@ def write_json(path, data):
         tmp.write_text(json.dumps(data, indent=2, allow_nan=False) + "\n")
 
 
-def convert(job, output, threads):
+def convert(job, output, threads, backend=None):
     started = monotonic()
     label, mode = job["id"], job["mode"]
     target = output / (label + ".h5")
     receipt = output / ".batch" / (label + ".json")
     try:
-        with threadpool_limits(limits=threads):
+        with backend_setting(backend), threadpool_limits(limits=threads):
             files = input_paths(job)
             stamps = [stamp(p) for p in files]
             signature = {
@@ -254,12 +271,24 @@ def convert(job, output, threads):
         }
 
 
-def run_batch(manifest, output, workers=1, threads=1, check_only=False):
+def run_batch(manifest, output=None, workers=None, threads=None, check_only=None):
     import fcntl
 
+    manifest = Path(manifest).resolve()
+    config = load_config(manifest)
+    if config.get("command", "convert-batch") != "convert-batch":
+        raise ValueError("Expected a convert-batch configuration")
+    settings = runtime_controls(config, batch=True)
+    workers = settings.get("workers", 1) if workers is None else workers
+    threads = settings.get("threads", 1) if threads is None else threads
+    check_only = settings.get("check_only", False) if check_only is None else check_only
+    if output is None:
+        if not isinstance(config.get("output"), str) or not config["output"].strip():
+            raise ValueError("Specify the output directory in the configuration")
+        output = manifest.parent / config["output"]
     if workers < 1 or threads < 1:
         raise ValueError("Worker and thread counts must be positive")
-    jobs = read_jobs(manifest)
+    jobs = read_jobs(manifest, config)
     with h5py.File(jobs[0]["registry"]) as registry:
         if registry.attrs.get("format") != REGISTRY_FORMAT:
             raise ValueError("Batch conversion requires a frozen AO registry")
@@ -308,7 +337,9 @@ def run_batch(manifest, output, workers=1, threads=1, check_only=False):
             )
             try:
                 futures = {
-                    pool.submit(convert, job, output, threads): job["id"]
+                    pool.submit(
+                        convert, job, output, threads, settings.get("backend")
+                    ): job["id"]
                     for job in jobs
                 }
                 for future in as_completed(futures):

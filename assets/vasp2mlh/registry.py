@@ -7,6 +7,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 
+from .configuration import load_config
 from .basis import Shell, load_basis, read_potcar
 from .pipeline import output_file
 from .realspace import SPARSE_FORMAT, structure
@@ -31,7 +32,7 @@ def freeze(config, output, potcar=None):
     if h5py.is_hdf5(config):
         raise ValueError("This basis is already frozen")
     potentials = read_potcar(potcar) if potcar else {}
-    specs = json.loads(Path(config).read_text())
+    specs = load_config(config)
     hashes = {
         sym: potentials[sym].sha256
         for sym, items in specs.items()

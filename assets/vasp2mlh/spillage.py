@@ -1,6 +1,5 @@
 """Select radial mixtures on construction WAVECARs with a fixed orbital layout."""
 
-import json
 from itertools import product
 from pathlib import Path
 
@@ -9,6 +8,7 @@ import numpy as np
 from scipy.interpolate import CubicSpline
 from scipy.linalg import block_diag, eigvalsh, solve
 
+from .configuration import load_config
 from .basis import Shell, read_potcar
 from .model import adjoint, ao_and_metric
 from .pipeline import file_sha256
@@ -73,7 +73,7 @@ def optimize(run, registry, config, output):
         )
     }:
         raise ValueError("Choose a separate registry output")
-    spec = json.loads(Path(config).read_text())
+    spec = load_config(config)
     meta = metadata(run / "vasprun.xml")
     wave = Wavecar(run / "WAVECAR")
     atoms = meta["atoms"]

@@ -11,6 +11,7 @@ import h5py
 import numpy as np
 from scipy.linalg import block_diag, eigvalsh
 
+from .configuration import load_config
 from .realspace import matrices_k, SPARSE_FORMAT
 from .basis import load_basis, read_potcar
 from .model import (
@@ -210,7 +211,7 @@ def build(run, config, output, mesh=None, complement=0.0, potential_run=None):
             basis_config=(
                 json.dumps({"registry_sha256": file_sha256(config)})
                 if h5py.is_hdf5(config)
-                else Path(config).read_text()
+                else json.dumps(load_config(config))
             ),
             potcar_sha256=file_sha256(run / "POTCAR"),
             paw_sha256_by_element=json.dumps(

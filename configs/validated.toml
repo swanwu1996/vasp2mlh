@@ -1,0 +1,29 @@
+command = "convert-batch"
+mode = "validated"
+registry = "basis.h5"
+output = "models"
+
+[runtime]
+workers = 2
+threads = 1
+backend = "cython"
+check_only = false
+
+[defaults]
+energy_window = [-1.0, 2.0]  # eV relative to the source Fermi level
+cutoff = 12.0                # H block radius, angstrom
+max_rmse = 0.010             # eV
+max_error = 0.050            # eV
+relative_pruning = false
+centre_offset = 6.0
+width = 1.0
+floor = 0.005
+taper = 2.0
+
+[[jobs]]
+id = "s0001"
+run = "calculations/s0001/mesh"
+reference = "calculations/s0001/check"
+# potential_run = "calculations/s0001/potential"
+# [jobs.options]
+# mesh = [4, 4, 4]  # only for an explicitly listed complete mesh
