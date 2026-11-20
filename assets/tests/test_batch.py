@@ -54,11 +54,11 @@ class BatchTests(unittest.TestCase):
         self.assertNotIn("\r", log.getvalue())
         self.config["runtime"] = {"progress": False}
         self.write()
-        quiet = StringIO()
-        with redirect_stderr(quiet):
+        legacy = StringIO()
+        with redirect_stderr(legacy):
             run_batch(self.manifest, self.out, check_only=True)
-        self.assertNotIn("2/2", quiet.getvalue())
-        self.assertIn("b failed", quiet.getvalue())
+        self.assertIn("2/2", legacy.getvalue())
+        self.assertIn("b failed", legacy.getvalue())
         self.assertEqual([r["status"] for r in summary["jobs"]], ["ready", "failed"])
         self.assertFalse((self.out / "summary.json").exists())
         for name in ("a", "../not-a-job"):
@@ -101,7 +101,7 @@ class BatchTests(unittest.TestCase):
             f.attrs["user"] = "other"
         self.assertIn("not owned", go()["error"])
 
-    def test_validated_requires_reference_and_window(self):
+    def test_validated_requires_reference_and_defaults_to_fermi_window(self):
         self.config["mode"] = "validated"
         with self.assertRaisesRegex(ValueError, "window"):
             self.write()
@@ -115,6 +115,8 @@ class BatchTests(unittest.TestCase):
             self.write()
         self.config["jobs"][0]["reference"] = "blind"
         self.assertEqual(self.write()[0]["reference"], self.root / "blind")
+        del self.config["defaults"]["band_range"]
+        self.assertEqual(self.write()[0]["options"]["energy_window"], [-1.0, 2.0])
 
 
 class RadialTests(unittest.TestCase):

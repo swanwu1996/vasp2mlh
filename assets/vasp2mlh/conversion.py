@@ -6,6 +6,7 @@ from tempfile import TemporaryDirectory
 
 from .atomic import generate
 from .band_release import reconstruct
+from .configuration import DEFAULT_ENERGY_WINDOW
 from .export import deeph, hamgnn
 from .progress import ConversionProgress, progress_bar
 
@@ -58,7 +59,7 @@ def convert_sample(args):
     # AO preparation, seven reconstruction stages and the final sample export.
     with (
         TemporaryDirectory(dir=output.parent) as staging,
-        progress_bar("Prepare AO basis", 9, "stage", args.progress) as bar,
+        progress_bar("Prepare AO basis", 9, "stage") as bar,
     ):
         progress = ConversionProgress(bar)
         result = Path(staging) / "result"
@@ -68,7 +69,7 @@ def convert_sample(args):
             generate(registry, [run / "POTCAR"])
         window = args.energy_window
         if window is None and args.band_range is None:
-            window = [-1.0, 2.0]
+            window = list(DEFAULT_ENERGY_WINDOW)
         model = result / "model.h5"
         report = reconstruct(
             run,

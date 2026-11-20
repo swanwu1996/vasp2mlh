@@ -45,6 +45,11 @@ def make_parser():
     single.add_argument(
         "-o", "--output", help="new result directory (default: RUN/mlh)"
     )
+    single.add_argument(
+        "--threads",
+        type=int,
+        help="BLAS/OpenMP threads for this structure (default: 1)",
+    )
     single.add_argument("--format", choices=["deeph", "hamgnn"], default="deeph")
     single.add_argument(
         "--nao-max",
@@ -454,16 +459,25 @@ def main(argv=None):
                         if dest is not None and Path(dest).resolve() == path:
                             raise ValueError("Output collides with control file")
                     stack.enter_context(backend_setting(settings.get("backend")))
-                    if "threads" in settings:
+                    if command != "convert" and "threads" in settings:
                         stack.enter_context(
                             threadpool_limits(limits=settings["threads"])
                         )
             else:
                 args = parser.parse_args(argv)
             if args.command == "convert":
-                args.progress = settings.get("progress", True)
-            if args.command == "convert" and "threads" not in settings:
-                stack.enter_context(threadpool_limits(limits=1))
+                if (
+                    args.threads is not None
+                    and "threads" in settings
+                    and args.threads != settings["threads"]
+                ):
+                    raise ValueError("Conflicting values for threads")
+                threads = (
+                    settings.get("threads", 1) if args.threads is None else args.threads
+                )
+                if threads < 1:
+                    raise ValueError("threads must be a positive integer")
+                stack.enter_context(threadpool_limits(limits=threads))
             return execute(parser, args)
     except (
         ValueError,

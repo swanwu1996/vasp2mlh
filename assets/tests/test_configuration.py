@@ -6,6 +6,7 @@ import unittest
 from unittest.mock import patch
 
 import h5py
+from threadpoolctl import threadpool_info
 
 from vasp2mlh.cli import main, make_parser
 from vasp2mlh.batch import read_jobs
@@ -99,6 +100,26 @@ class ConfigurationTests(unittest.TestCase):
             runtime_controls({"runtime": {"threads": True}}, True)
         with self.assertRaisesRegex(ValueError, "Allowed runtime"):
             runtime_controls({"runtime": {"check_only": True}}, False)
+
+    def test_convert_applies_thread_limit_from_toml_and_cli(self):
+        def limit(parser, args):
+            return {
+                pool["num_threads"]
+                for pool in threadpool_info()
+                if pool["user_api"] == "blas"
+            }
+
+        with (
+            TemporaryDirectory() as d,
+            patch("vasp2mlh.cli.execute", side_effect=limit),
+        ):
+            config = Path(d) / "mlh.toml"
+            config.write_text('command="convert"\n[parameters]\nrun="."\nthreads=2\n')
+            self.assertEqual(main([str(config)]), {2})
+            self.assertEqual(main(["convert", ".", "--threads", "3"]), {3})
+            self.assertEqual(main(["convert", "."]), {1})
+            with self.assertRaises(SystemExit):
+                main(["convert", ".", "--threads", "0"])
 
     def test_legacy_subcommand_and_new_backend_scope(self):
         with (

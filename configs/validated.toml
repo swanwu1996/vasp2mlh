@@ -3,15 +3,12 @@ mode = "validated"
 registry = "basis.h5"
 output = "models"
 
-[runtime]
-progress = true
 workers = 2
 threads = 1
 backend = "cython"
 check_only = false
 
 [defaults]
-energy_window = [-1.0, 2.0]  # eV relative to the source Fermi level
 cutoff = 12.0                # H block radius, angstrom
 max_rmse = 0.010             # eV
 max_error = 0.050            # eV

@@ -3,7 +3,10 @@
   "mode": "projection",
   "registry": "basis.h5",
   "output": "projection-models",
-  "runtime": {"workers": 2, "threads": 1, "backend": "auto", "check_only": false},
+  "workers": 2,
+  "threads": 1,
+  "backend": "auto",
+  "check_only": false,
   "defaults": {"cutoff": 12.0, "complement": 0.0},
   "jobs": [{"id": "s0001", "run": "calculations/s0001/mesh"}]
 }

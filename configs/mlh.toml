@@ -4,12 +4,9 @@ format = "deeph"  # "deeph" or "hamgnn"
 # nao_max = 19  # HamGNN only; choose 14, 19 or 26 to match the AO layout
 run = "mesh"
 reference = "blind"
-output = "mlh"
-energy_window = [-1.0, 2.0]  # eV relative to the source Fermi level
+threads = 2  # BLAS/OpenMP threads for this structure
+output = "mlh"  # new result directory
 # registry = "shared/basis.h5"
 # cutoff = 12.0              # angstrom
 # max_rmse = 0.010           # eV
 # max_error = 0.050          # eV
-
-[runtime]
-progress = true

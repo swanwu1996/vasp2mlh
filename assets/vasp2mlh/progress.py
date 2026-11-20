@@ -32,7 +32,7 @@ class LogProgress(ProgressBar):
 
 
 @contextmanager
-def progress_bar(label, total, unit, enabled=True, projected=None):
+def progress_bar(label, total, unit, *, projected=None):
     interactive = sys.stderr.isatty()
     renderer = ProgressBar if interactive else LogProgress
     interval = 2 if interactive else 15
@@ -44,7 +44,7 @@ def progress_bar(label, total, unit, enabled=True, projected=None):
         desc=label,
         unit=unit,
         file=sys.stderr,
-        disable=not enabled,
+        disable=False,
         dynamic_ncols=interactive,
         mininterval=0.3 if interactive else interval,
         miniters=1,
@@ -55,9 +55,6 @@ def progress_bar(label, total, unit, enabled=True, projected=None):
             + "{postfix}]"
         ),
     ) as bar:
-        if bar.disable:
-            yield bar
-            return
         # Long native calls and workers waiting on their first result still show elapsed time.
         stop = Event()
 
@@ -86,8 +83,6 @@ class ConversionProgress:
             self.bar.refresh()
 
     def projected(self, done, total):
-        if self.bar.disable:
-            return
         self.bar.set_postfix_str(f"k-points {done}/{total}", refresh=False)
         now = monotonic()
         if done in (1, total) or now - self.last_point >= self.bar.mininterval:

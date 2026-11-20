@@ -25,21 +25,34 @@ def load_config(path):
     return config
 
 
+BATCH_CONTROLS = {"workers", "threads", "backend", "check_only"}
+DEFAULT_ENERGY_WINDOW = (-1.0, 2.0)
+
+
 def runtime_controls(config, batch):
-    settings = config.get("runtime", {})
+    legacy = config.get("runtime", {})
     allowed = {"threads", "backend"}
     if batch or config.get("command") == "convert":
         allowed.add("progress")
     if batch:
-        allowed.update(("workers", "check_only"))
-    if not isinstance(settings, dict) or settings.keys() - allowed:
+        allowed.update(BATCH_CONTROLS)
+    if not isinstance(legacy, dict) or legacy.keys() - allowed:
         raise ValueError(f"Allowed runtime controls: {', '.join(sorted(allowed))}")
+    settings = dict(legacy)
+    if batch:
+        for name in config.keys() & BATCH_CONTROLS:
+            if name in settings and config[name] != settings[name]:
+                raise ValueError(f"Conflicting values for {name}")
+            settings[name] = config[name]
     for name in ("threads", "workers"):
         if name in settings and (type(settings[name]) is not int or settings[name] < 1):
-            raise ValueError(f"runtime.{name} must be a positive integer")
+            raise ValueError(f"{name} must be a positive integer")
     for key in ("check_only", "progress"):
         if key in settings and type(settings[key]) is not bool:
             raise ValueError(f"runtime.{key} must be true or false")
+    settings.pop(
+        "progress", None
+    )  # Old manifests still load; progress is always shown.
     if settings.get("backend", "auto") not in ("auto", "cython", "scipy"):
         raise ValueError("runtime.backend must be auto, cython or scipy")
     return settings

@@ -18,7 +18,13 @@ from threadpoolctl import threadpool_limits
 from . import __version__
 from .band_release import reconstruct
 from .basis import radial_backend
-from .configuration import backend_setting, load_config, runtime_controls
+from .configuration import (
+    BATCH_CONTROLS,
+    DEFAULT_ENERGY_WINDOW,
+    backend_setting,
+    load_config,
+    runtime_controls,
+)
 from .pipeline import build, file_sha256, output_file
 from .realspace import SPARSE_FORMAT
 from .progress import progress_bar
@@ -68,7 +74,10 @@ def read_jobs(manifest, config=None):
         not isinstance(mode, str)
         or mode not in modes
         or config.keys()
-        - {"command", "mode", "registry", "defaults", "jobs", "runtime", "output"}
+        - (
+            {"command", "mode", "registry", "defaults", "jobs", "runtime", "output"}
+            | BATCH_CONTROLS
+        )
     ):
         raise ValueError("Invalid batch mode or unknown top-level manifest field")
 
@@ -97,6 +106,8 @@ def read_jobs(manifest, config=None):
         options = {**config.get("defaults", {}), **row.get("options", {})}
         if row.keys() - allowed or options.keys() - modes[mode]:
             raise ValueError(f"Unknown field or option for {mode} job {label}")
+        if mode == "validated" and not options.keys() & {"energy_window", "band_range"}:
+            options["energy_window"] = list(DEFAULT_ENERGY_WINDOW)
         if mode == "validated" and (
             not {"cutoff", "max_rmse", "max_error"} <= options.keys()
             or len(options.keys() & {"energy_window", "band_range"}) != 1
@@ -336,14 +347,13 @@ def run_batch(manifest, output=None, workers=None, threads=None, check_only=None
     if any(p.is_symlink() or p.resolve() in protected for p in destinations):
         raise ValueError("A batch destination is a symlink or collides with an input")
     context = multiprocessing.get_context("spawn")
-    enabled = settings.get("progress", True)
-    projected = context.Value("Q", 0) if enabled and not check_only else None
+    projected = context.Value("Q", 0) if not check_only else None
     label = (
         "Preflight" if check_only else f"Convert ({min(workers, len(jobs))} workers)"
     )
     with (
         (state / "lock").open("a") as lock,
-        progress_bar(label, len(jobs), "job", enabled, projected=projected) as bar,
+        progress_bar(label, len(jobs), "job", projected=projected) as bar,
     ):
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         results = {}
@@ -357,7 +367,7 @@ def run_batch(manifest, output=None, workers=None, threads=None, check_only=None
             counts[status] += 1
             if status == "failed":
                 message = f"{result['id']} failed: {result['error']}"
-                if sys.stderr.isatty() and enabled:
+                if sys.stderr.isatty():
                     bar.write(message, file=sys.stderr)
                 else:
                     print(message, file=sys.stderr, flush=True)
