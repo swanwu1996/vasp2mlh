@@ -30,20 +30,9 @@ def convert_sample(args):
         run / "WAVECAR",
         "Generate a full uniform complex WAVECAR with LWAVE=T and LREAL=F.",
     )
-    for directory, names, hint in (
-        (
-            run,
-            ("POTCAR", "CHGCAR", "vasprun.xml"),
-            "Use the matching source calculation.",
-        ),
-        (
-            potential,
-            ("vaspout.h5", "POTCAR", "CHGCAR", "vasprun.xml"),
-            "Use a matching WRT_POTENTIAL=total paw calculation.",
-        ),
-    ):
-        for name in names:
-            require_file(directory / name, hint)
+    for name in ("vasprun.xml", "POTCAR"):
+        require_file(run / name, "Use the matching source calculation.")
+    # reconstruct checks the functional-specific operator inputs after parsing the XML.
     registry = Path(args.registry) if args.registry else run / "basis.h5"
     needs_basis = not args.registry and not registry.exists() and not registry.is_symlink()
     if not needs_basis:
@@ -77,6 +66,7 @@ def convert_sample(args):
             cutoff=args.cutoff,
             max_rmse=args.max_rmse,
             max_error=args.max_error,
+            centre_offset=args.centre_offset, width=args.width, floor=args.floor, taper=args.taper,
             on_stage=progress.stage,
             on_kpoint=progress.projected,
         )

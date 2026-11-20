@@ -17,6 +17,84 @@ def table(node, path):
     return np.array([row.text.split() for row in el], dtype=float)
 
 
+# Parameters which define VASP's exact exchange and its reciprocal-space sampling.
+HYBRID_TAGS = {
+    "HFSCREEN",
+    "HFSCREENC",
+    "HFRCUT",
+    "HFALPHA",
+    "LRHFCALC",
+    "LTHOMAS",
+    "LMODELHF",
+    "LHFONE",
+    "BEXX",
+    "LMAXFOCK",
+    "NMAXFOCKAE",
+    "LFOCKAEDFT",
+    "NKRED",
+    "NKREDX",
+    "NKREDY",
+    "NKREDZ",
+    "PRECFOCK",
+    "ODDONLY",
+    "EVENONLY",
+    "SHIFTRED",
+    "ENCUTFOCK",
+    "AEXX_LR",
+    "EXXOEP",
+}
+
+
+def is_hybrid(meta):
+    return meta.get("operator_parameters", {}).get("LHFCALC") in {"T", ".TRUE.", "TRUE"}
+
+
+def split_mesh(meta, optional):
+    """Keep only the integration mesh in the training spectrum and WAVECAR map."""
+    weights = meta["weights"]
+    if (
+        weights.ndim != 1
+        or meta["kpoints"].shape != (len(weights), 3)
+        or meta["eig"].ndim != 3
+        or meta["eig"].shape[1] != len(weights)
+        or not np.isfinite(weights).all()
+        or np.any(weights < 0)
+        or not np.any(weights > 0)
+    ):
+        raise ValueError("Invalid integration weights in hybrid XML")
+    training = weights > 0
+    meta["wave_indices"] = np.flatnonzero(training)
+    meta["wave_nk"] = len(training)
+    if not np.all(training):
+        meta["holdout"] = dict(
+            kpoints=meta["kpoints"][~training],
+            eig=meta["eig"][:, ~training],
+            source="zero-weight",
+        )
+        meta["kpoints"] = meta["kpoints"][training]
+        meta["eig"] = meta["eig"][:, training]
+        meta["weights"] = weights[training]
+    if optional is not None:
+        ks = table(optional, "./kpoints/varray[@name='kpointlist']")
+        es = eigenvalues(optional)
+        if ks.ndim != 2 or ks.shape[1] != 3 or es.ndim != 3 or es.shape[1] != len(ks):
+            raise ValueError("Invalid KPOINTS_OPT spectrum in vasprun.xml")
+        meta["holdout"] = dict(kpoints=ks, eig=es, source="KPOINTS_OPT")
+    if meta["mesh"] is None:
+        # mesh_indices subsequently checks every offset and multiplicity.
+        wrapped = np.round(meta["kpoints"] % 1, decimals=7) % 1
+        meta["mesh"] = [len(np.unique(axis)) for axis in wrapped.T]
+
+
+def eigenvalues(parent):
+    return np.array(
+        [
+            [table(k, ".")[:, 0] for k in channel]
+            for channel in parent.findall("./eigenvalues/array/set/set")
+        ]
+    )
+
+
 def xc_parameters(settings):
     names = {
         "GGA",
@@ -35,6 +113,8 @@ def xc_parameters(settings):
         "VOSKOWN",
         "LUSE_VDW",
     }
+    if is_hybrid({"operator_parameters": settings}):
+        names |= HYBRID_TAGS
     return {k: v for k, v in settings.items() if k in names or k.startswith("LIBXC")}
 
 
@@ -91,7 +171,7 @@ def metadata(path):
         for section in (root.find("incar"), params)
         if section is not None
         for node in section.iter()
-        if node.attrib.get("name", "").strip() in operator_names
+        if node.attrib.get("name", "").strip() in operator_names | HYBRID_TAGS
         or node.attrib.get("name", "").strip().startswith("LIBXC")
     }
     types = root.findall("./atominfo/array[@name='atomtypes']/set/rc")
@@ -100,7 +180,8 @@ def metadata(path):
     mesh = root.findtext("./kpoints/generation/v[@name='divisions']")
     calcs = root.findall("./calculation")
     last = calcs[-1]
-    return dict(
+    meta = dict(
+        xml_path=Path(path).resolve(),
         operator_parameters=operator_parameters,
         atoms=Atoms(atoms, scaled_positions=frac, cell=cell, pbc=True),
         kpoints=table(root, "./kpoints/varray[@name='kpointlist']"),
@@ -122,13 +203,12 @@ def metadata(path):
         titles=titles,
         energy=float(last.findtext("./energy/i[@name='e_0_energy']")),
         efermi=float(last.findtext("./dos/i[@name='efermi']")),
-        eig=np.array(
-            [
-                [table(k, ".")[:, 0] for k in s]
-                for s in last.findall("./eigenvalues/array/set/set")
-            ]
-        ),
+        eig=eigenvalues(last),
     )
+    if is_hybrid(meta):
+        split_mesh(meta, root.find(".//eigenvalues_kpoints_opt"))
+    return meta
+
 
 
 class Wavecar:

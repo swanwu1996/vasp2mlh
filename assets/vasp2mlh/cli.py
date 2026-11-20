@@ -45,7 +45,7 @@ def make_parser():
     single.add_argument("run", help="VASP directory with a full uniform mesh")
     single.add_argument(
         "--reference",
-        help="off-grid reference for v2h_valid (default: RUN/reference)",
+        help="off-grid reference for v2h_valid (hybrids use same-SCF points in RUN; semilocal default: RUN/reference)",
     )
     single.add_argument(
         "--potential-run", help="matching PAW potential directory (default: RUN)"
@@ -180,27 +180,28 @@ def make_parser():
         nargs=3,
         help="dimensions for explicitly listed uniform source points",
     )
-    release.add_argument(
-        "--centre-offset",
-        type=float,
-        default=6.0,
-        help="filter centre above the source Fermi energy in eV (default 6)",
-    )
-    release.add_argument(
-        "--width", type=float, default=1.0, help="filter width in eV (default 1)"
-    )
-    release.add_argument(
-        "--floor",
-        type=float,
-        default=0.005,
-        help="squared filter amplitude floor (default .005)",
-    )
-    release.add_argument(
-        "--taper",
-        type=float,
-        default=2.0,
-        help="filter cutoff taper width in eV (default 2)",
-    )
+    for operation in (single, release):
+        operation.add_argument(
+            "--centre-offset",
+            type=float,
+            default=6.0,
+            help="filter centre above the source Fermi energy in eV (default 6)",
+        )
+        operation.add_argument(
+            "--width", type=float, default=1.0, help="filter width in eV (default 1)"
+        )
+        operation.add_argument(
+            "--floor",
+            type=float,
+            default=None,
+            help="regularization floor (default .005 for semilocal, .0001 for hybrid)",
+        )
+        operation.add_argument(
+            "--taper",
+            type=float,
+            default=2.0,
+            help="filter cutoff taper width in eV (default 2)",
+        )
     report = subs.add_parser(
         "band-report",
         help="show the independent validation report embedded in a reconstructed band model",

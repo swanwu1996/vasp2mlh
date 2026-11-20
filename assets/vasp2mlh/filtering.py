@@ -1,6 +1,7 @@
 """Variational projection on spectrally filtered PAW trial orbitals."""
 
 from pathlib import Path
+import json
 
 import h5py
 import numpy as np
@@ -10,6 +11,18 @@ from scipy.special import expit
 from .calibrate import metric_factors, ordinary_geometry, write_ordinary
 from .model import adjoint
 from .pipeline import file_sha256, output_file
+from .vasp import is_hybrid
+
+
+def upper_taper(energies, ceiling, taper):
+    x = np.clip((ceiling - energies) / taper, 0, 1)
+    return x**2 * (3 - 2 * x)
+
+
+def spectral_baseline(v, energies, ceiling, taper, complement):
+    """PAW spectral moment with a common upper cutoff and a flat complement."""
+    moment = (energies - complement) * upper_taper(energies, ceiling, taper)
+    return (v * moment) @ adjoint(v) + complement * np.eye(v.shape[0])
 
 
 def filtered_operator(
@@ -25,8 +38,11 @@ def filtered_operator(
     return_projections=False,
 ):
     """All inputs use the orthonormal PAW trial frame and one absolute energy zero."""
-    x = np.clip((ceiling - energies) / taper, 0, 1)
-    weight = (1 - floor) * expit((centre - energies) / width) * x**2 * (3 - 2 * x)
+    weight = (
+        (1 - floor)
+        * expit((centre - energies) / width)
+        * upper_taper(energies, ceiling, taper)
+    )
     weighted = projections * weight
     gram = floor * np.eye(len(h)) + weighted @ adjoint(projections)
     moment = floor * h + (weighted * energies) @ adjoint(projections)
@@ -39,7 +55,9 @@ def filtered_operator(
     return effective
 
 
-def filter_model(model, overlap, output, centre_offset, width, floor, taper):
+def filter_model(
+    model, overlap, output, centre_offset, width, floor, taper, *, spectral_hybrid=False
+):
     if Path(output).resolve() in {Path(p).resolve() for p in (model, overlap)}:
         raise ValueError("Choose a separate output")
     if not np.isfinite([centre_offset, width, floor, taper]).all() or not (
@@ -49,7 +67,10 @@ def filter_model(model, overlap, output, centre_offset, width, floor, taper):
     with h5py.File(model) as src, h5py.File(overlap) as ov:
         if (
             src.attrs.get("format") != "vasp2mlh/1"
-            or src.attrs.get("hamiltonian_method") != "direct_scalar_paw"
+            or (
+                src.attrs.get("hamiltonian_method", "spectral")
+                != ("spectral" if spectral_hybrid else "direct_scalar_paw")
+            )
             or ov.attrs.get("format") != "vasp2mlh/overlap/1"
             or src["k/H"].shape[0] != 1
             or "subspace" in src
@@ -57,11 +78,23 @@ def filter_model(model, overlap, output, centre_offset, width, floor, taper):
             raise ValueError(
                 "Expected a scalar direct PAW model and ordinary AO overlap"
             )
+        if spectral_hybrid and not is_hybrid(
+            {"operator_parameters": json.loads(src.attrs["xc_settings"])}
+        ):
+            raise ValueError("A hybrid spectral model requires hybrid eigenpairs")
         atoms, bounds, r, s_real, k, ordinary = ordinary_geometry(src, ov)
         atoms.set_cell(src["structure/projection_cell"][:], scale_atoms=True)
         energies = src["k/eigenvalues"][0]
         ceiling = float(energies[:, -1].min())
         centre = float(src.attrs["fermi_eV"] + centre_offset)
+        if spectral_hybrid:
+            required = centre + 2 * taper
+            if ceiling < required:
+                raise ValueError(
+                    f"Hybrid WAVECAR spectrum ends at {ceiling:.4f} eV; "
+                    f"increase NBANDS to cover {required:.4f} eV across the source mesh"
+                )
+            ceiling = required
         if centre >= ceiling:
             raise ValueError("Filter centre reaches the available VASP band ceiling")
         nocc = int(np.ceil(src.attrs["nelect"] / 2))
@@ -81,8 +114,13 @@ def filter_model(model, overlap, output, centre_offset, width, floor, taper):
             for i, energy in enumerate(energies):
                 _, inverse = metric_factors(src["k/S"][i])
                 root, _ = metric_factors(ordinary[i])
-                h = inverse @ src["k/H"][0, i] @ inverse
                 v = inverse @ src["k/projection"][0, i]
+                if spectral_hybrid:
+                    h = spectral_baseline(
+                        v, energy, ceiling, taper, src.attrs["complement_eV"]
+                    )
+                else:
+                    h = inverse @ src["k/H"][0, i] @ inverse
                 effective = filtered_operator(
                     h, v, energy, centre, width, floor, ceiling, taper
                 )
@@ -95,7 +133,9 @@ def filter_model(model, overlap, output, centre_offset, width, floor, taper):
             out["filter/min_edge_weight"] = coverage
             out["filter/mesh_edge_errors_eV"] = errors
             out.attrs.update(
-                hamiltonian_method="filtered_paw_ritz",
+                hamiltonian_method="hybrid_spectral_ritz"
+                if spectral_hybrid
+                else "filtered_paw_ritz",
                 metric="ordinary",
                 filter_centre_eV=centre,
                 filter_width_eV=width,
@@ -104,3 +144,8 @@ def filter_model(model, overlap, output, centre_offset, width, floor, taper):
                 filter_taper_eV=taper,
                 overlap_sha256=file_sha256(overlap),
             )
+
+            if spectral_hybrid:
+                out.attrs["complement_policy"] = (
+                    "filter_centre_plus_two_tapers_plus_10_eV"
+                )

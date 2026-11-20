@@ -65,7 +65,8 @@ def projection_header(run, meta, mesh):
     w = Wavecar(run / "WAVECAR")
     xml_e = meta["eig"]
     if (
-        xml_e.shape != (w.ns, w.nk, w.nb)
+        xml_e.shape != (w.ns, len(meta["kpoints"]), w.nb)
+        or w.nk != meta.get("wave_nk", len(meta["kpoints"]))
         or not np.allclose(w.cell, atoms.cell, atol=1e-7)
         or not np.isclose(w.encut, meta["encut"])
         or meta["lreal"] not in ("F", ".FALSE.")
@@ -76,7 +77,7 @@ def projection_header(run, meta, mesh):
     if meta["spinor"] and w.ns != 1:
         raise ValueError("Unexpected spinor record layout")
     k = meta["kpoints"]
-    if not np.allclose(meta["weights"], 1 / w.nk, atol=1e-7, rtol=0):
+    if not np.allclose(meta["weights"], 1 / len(k), atol=1e-7, rtol=0):
         raise ValueError("Fourier transform requires a uniformly weighted full mesh. Run VASP with ISYM=-1.")
     mesh = mesh if mesh is not None else meta["mesh"]
     if mesh is None:
@@ -104,6 +105,7 @@ def build(
     xml_e = meta["eig"]
     k = meta["kpoints"]
     points = np.empty_like(k)
+    wave_indices = meta.get("wave_indices", range(len(k)))
     potentials = read_potcar(run / "POTCAR")
     symbols = atoms.get_chemical_symbols()
     basis = load_basis(config, potentials, symbols)
@@ -134,22 +136,22 @@ def build(
     ls = {s: [sh.l for sh in shells] for s, shells in basis.items()}
     norb = sum(2 * l + 1 for s in symbols for l in ls[s])
     dim = norb * (2 if meta["spinor"] else 1)
-    hs = np.empty((w.ns, w.nk, dim, dim), complex)
+    hs = np.empty((w.ns, len(k), dim, dim), complex)
     radial_table = RadialTable(basis)
-    ss = np.empty((w.nk, norb, norb), complex)
-    spectral_shape = (w.ns, w.nk, w.nb)
+    ss = np.empty((len(k), norb, norb), complex)
+    spectral_shape = (w.ns, len(k), w.nb)
     energies, occupations, weights = (np.empty(spectral_shape) for _ in range(3))
-    gram = np.empty((w.ns, w.nk))
+    gram = np.empty((w.ns, len(k)))
     with output_file(output) as tmp, h5py.File(tmp, "w") as f:
         proj = f.create_dataset(
             "k/projection",
-            (w.ns, w.nk, dim, w.nb),
+            (w.ns, len(k), dim, w.nb),
             dtype="c16",
             chunks=(1, 1, dim, w.nb),
         )
         for ik, expected in enumerate(k):
             for spin in range(w.ns):
-                point, bands, coeff = w.read(spin, ik)
+                point, bands, coeff = w.read(spin, wave_indices[ik])
                 if not np.allclose(point, expected, atol=1e-7) or not np.allclose(
                     bands[:, 0], xml_e[spin, ik], atol=1e-4, rtol=0
                 ):

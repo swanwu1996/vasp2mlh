@@ -27,7 +27,7 @@ from .configuration import (
 )
 from .pipeline import build, file_sha256, output_file, projection_header
 from .operator import check_potential_records, check_potential_source
-from .vasp import metadata
+from .vasp import is_hybrid, metadata
 from xml.etree.ElementTree import ParseError
 from .realspace import SPARSE_FORMAT
 from .progress import progress_bar
@@ -73,6 +73,7 @@ def read_jobs(manifest, config=None):
         },
         "projection": {"cutoff", "mesh", "complement"},
     }
+    modes["hybrid"] = modes["validated"]
     if (
         not isinstance(mode, str)
         or mode not in modes
@@ -113,14 +114,14 @@ def read_jobs(manifest, config=None):
             raise ValueError(f"Duplicate or invalid job id: {label!r}")
         ids.add(label)
         allowed = {"id", "run", "options"}
-        if mode == "validated":
+        if mode in ("validated", "hybrid"):
             allowed.update(("reference", "potential_run"))
         options = {**config.get("defaults", {}), **row.get("options", {})}
         if row.keys() - allowed or options.keys() - modes[mode]:
             raise ValueError(f"Unknown field or option for {mode} job {label}")
-        if mode == "validated" and not options.keys() & {"energy_window", "band_range"}:
+        if mode in ("validated", "hybrid") and not options.keys() & {"energy_window", "band_range"}:
             options["energy_window"] = list(DEFAULT_ENERGY_WINDOW)
-        if mode == "validated" and (
+        if mode in ("validated", "hybrid") and (
             not {"cutoff", "max_rmse", "max_error"} <= options.keys()
             or len(options.keys() & {"energy_window", "band_range"}) != 1
         ):
@@ -149,8 +150,8 @@ def read_jobs(manifest, config=None):
             "registry": registry,
             "options": options,
         }
-        if mode == "validated":
-            job["reference"] = path(row["reference"])
+        if mode in ("validated", "hybrid"):
+            job["reference"] = path(row.get("reference", row["run"]) if mode == "hybrid" else row["reference"])
             job["potential_run"] = path(row.get("potential_run", row["run"]))
         jobs.append(job)
     if not jobs:
@@ -172,6 +173,10 @@ def input_paths(job):
         paths.extend(
             d / "OUTCAR" for d in (source, reference) if (d / "OUTCAR").exists()
         )
+    elif job["mode"] == "hybrid":
+        paths.append(job["reference"] / "vasprun.xml")
+        if (source / "OUTCAR").is_file():
+            paths.append(source / "OUTCAR")
     elif (source / "CHGCAR").is_file() and (source / "CHGCAR").stat().st_size:
         paths.append(source / "CHGCAR")
     return list(dict.fromkeys(paths))
@@ -261,7 +266,9 @@ def convert(job, output, threads, backend=None):
                 count_projected_point if _projected_points is not None else None
             )
             with output_file(target) as tmp:
-                if mode == "validated":
+                if mode in ("validated", "hybrid"):
+                    if (mode == "hybrid") != is_hybrid(metadata(job["run"] / "vasprun.xml")):
+                        raise ValueError("Batch mode disagrees with source functional")
                     report = reconstruct(
                         job["run"],
                         job["registry"],
@@ -325,7 +332,9 @@ def preflight(job):
         stamp(path)
     run = job["run"]
     src = metadata(run / "vasprun.xml")
-    if job["mode"] == "validated":
+    if job["mode"] in ("hybrid", "validated"):
+        if (job["mode"] == "hybrid") != is_hybrid(src):
+            raise ValueError("Batch mode must match the source functional: hybrid or validated")
         check_source(src, run)
     wave, _ = projection_header(run, src, job["options"].get("mesh"))
     symbols = src["atoms"].get_chemical_symbols()
@@ -342,11 +351,12 @@ def preflight(job):
         check_potential_source(src, potential_meta)
         with h5py.File(job["potential_run"] / "vaspout.h5") as potential:
             check_potential_records(potential)
+    if job["mode"] in ("hybrid", "validated"):
         reference_points(src, job["reference"])
     return {
-        "kpoints": wave.nk,
+        "kpoints": len(src["kpoints"]) if is_hybrid(src) else wave.nk,
         "orbitals": dim,
-        "dense_hs_bytes": 16 * wave.nk * (wave.ns * hdim**2 + dim**2),
+        "dense_hs_bytes": 16 * (len(src["kpoints"]) if is_hybrid(src) else wave.nk) * (wave.ns * hdim**2 + dim**2),
     }
 
 

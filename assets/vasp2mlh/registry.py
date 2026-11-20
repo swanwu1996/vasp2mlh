@@ -11,7 +11,7 @@ from .configuration import load_config
 from .basis import Shell, load_basis, read_potcar
 from .pipeline import output_file
 from .realspace import SPARSE_FORMAT, structure
-from .vasp import xc_parameters
+from .vasp import is_hybrid, xc_parameters
 
 FORMAT = "vasp2mlh/basis-registry/1"
 ANGULAR = "real tesseral m=-l..l, Wikipedia"
@@ -217,7 +217,10 @@ def label_definition(f):
     ):
         if key in attrs:
             settings[key] = np.asarray(attrs[key]).tolist()
-    if method == "filtered_paw_ritz":
+    if method == "hybrid_spectral_ritz":
+        settings.pop("complement_eV")
+        settings["complement_policy"] = attrs["complement_policy"]
+    if method in {"filtered_paw_ritz", "hybrid_spectral_ritz"}:
         for key in ("filter_width_eV", "filter_floor", "filter_taper_eV"):
             settings[key] = float(attrs[key])
         settings["centre_offset_eV"] = round(
@@ -285,6 +288,8 @@ def audit(models, registry=None, labels=False):
                             raise ValueError(f"Conflicting XC provenance in {path}")
                         xc = {**recorded, **xc}
                         break
+                if is_hybrid({"operator_parameters": xc}) and not {"HFSCREEN", "AEXX"} <= xc.keys():
+                    raise ValueError(f"Incomplete nonlocal exchange definition in {path}")
                 if xc.get("GGA") in ("LI", "LIBXC") and not xc.get("LIBXC1"):
                     raise ValueError(f"Missing Libxc functional identity in {path}")
                 known_xc.add(json.dumps(xc, sort_keys=True))
