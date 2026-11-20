@@ -1,5 +1,6 @@
 import argparse
 import json
+from pathlib import Path
 from xml.etree.ElementTree import ParseError
 
 import h5py
@@ -16,7 +17,93 @@ def main():
     parser = argparse.ArgumentParser(
         prog="vasp2mlh", description="VASP WAVECAR to PAW-metric AO Hamiltonians"
     )
+    from . import __version__
+
+    parser.add_argument(
+        "--version", action="version", version=f"%(prog)s {__version__}"
+    )
     subs = parser.add_subparsers(dest="command", required=True)
+    release = subs.add_parser(
+        "reconstruct-bands",
+        help="build a fixed-basis scalar LDA/GGA model and validate its cutoff spectrum on independent VASP points",
+    )
+    release.add_argument("run", help="full uniform VASP source mesh")
+    release.add_argument("registry", help="frozen AO registry HDF5")
+    release.add_argument(
+        "reference", help="matched ICHARG=11 VASP validation directory"
+    )
+    release.add_argument("output", help="validated sparse HDF5 archive")
+    scope = release.add_mutually_exclusive_group(required=True)
+    scope.add_argument(
+        "--band-range",
+        type=int,
+        nargs=2,
+        metavar=("FIRST", "LAST"),
+        help="inclusive ordered band numbers, starting at 1",
+    )
+    scope.add_argument(
+        "--energy-window",
+        type=float,
+        nargs=2,
+        metavar=("LOW", "HIGH"),
+        help="energy interval in eV relative to the source Fermi energy",
+    )
+    release.add_argument(
+        "--cutoff", type=float, required=True, help="hard H block cutoff in angstrom"
+    )
+    release.add_argument(
+        "--relative-pruning",
+        action="store_true",
+        help="instead cut H minus the source energy reference times S, retaining the full ordinary S",
+    )
+    release.add_argument(
+        "--max-rmse",
+        type=float,
+        required=True,
+        help="maximum accepted RMS band error in eV for each of the source and validation samples",
+    )
+    release.add_argument(
+        "--max-error",
+        type=float,
+        required=True,
+        help="maximum accepted single-band error in eV on either sample",
+    )
+    release.add_argument(
+        "--potential-run",
+        help="matching WRT_POTENTIAL=total paw directory (default: source run)",
+    )
+    release.add_argument(
+        "--mesh",
+        type=int,
+        nargs=3,
+        help="dimensions for explicitly listed uniform source points",
+    )
+    release.add_argument(
+        "--centre-offset",
+        type=float,
+        default=6.0,
+        help="filter centre above the source Fermi energy in eV (default 6)",
+    )
+    release.add_argument(
+        "--width", type=float, default=1.0, help="filter width in eV (default 1)"
+    )
+    release.add_argument(
+        "--floor",
+        type=float,
+        default=0.005,
+        help="squared filter amplitude floor (default .005)",
+    )
+    release.add_argument(
+        "--taper",
+        type=float,
+        default=2.0,
+        help="filter cutoff taper width in eV (default 2)",
+    )
+    report = subs.add_parser(
+        "band-report",
+        help="show the independent validation report embedded in a reconstructed band model",
+    )
+    report.add_argument("model")
     gen = subs.add_parser(
         "basis-generate",
         help="generate a raw PAW reference or a compact multi-zeta AO registry",
@@ -186,6 +273,11 @@ def main():
     band.add_argument(
         "output", help="text, kx ky kz spin(0-based) then ordered eigenvalues in eV"
     )
+    band.add_argument(
+        "--validated-window",
+        action="store_true",
+        help="emit only the declared model window as kx ky kz band_1based energy_eV rows",
+    )
     dos = subs.add_parser(
         "dos", help="Gaussian DOS, projected DOS and Lowdin orbital populations"
     )
@@ -240,7 +332,20 @@ def main():
     view.add_argument("-o", "--output", required=True)
     args = parser.parse_args()
     try:
-        if args.command == "basis-generate":
+        if args.command == "reconstruct-bands":
+            from .band_release import reconstruct
+
+            options = vars(args).copy()
+            del options["command"]
+            print(json.dumps(reconstruct(**options), indent=2))
+        elif args.command == "band-report":
+            with h5py.File(args.model) as f:
+                print(
+                    json.dumps(
+                        json.loads(f["band_validation"].attrs["report"]), indent=2
+                    )
+                )
+        elif args.command == "basis-generate":
             from .atomic import generate
 
             generate(args.output, args.potcar, args.layout)
@@ -346,11 +451,38 @@ def main():
         elif args.command == "hamgnn":
             hamgnn(args.models, args.output, args.nao_max, args.basis_lock)
         elif args.command == "bands":
+            if Path(args.output).resolve() in {
+                Path(args.model).resolve(),
+                Path(args.points).resolve(),
+            }:
+                raise ValueError("Band output collides with the model or k-point input")
             k = np.loadtxt(args.points, ndmin=2)
             if k.shape[1] != 3 or not np.isfinite(k).all():
                 raise ValueError("Expected finite fractional k-point triples")
             with h5py.File(args.model) as f:
                 e = bands(f, k)
+                if args.validated_window:
+                    profile = json.loads(f["band_validation"].attrs["report"])
+                    values = e[0]
+                    br = profile["band_range_1based"]
+                    if br is None:
+                        lo, hi = profile["energy_window_absolute_eV"]
+                        if np.any(values[:, -1] <= hi):
+                            raise ValueError(
+                                "AO spectrum does not extend above the declared window at all query points"
+                            )
+                        mask = (values >= lo) & (values <= hi)
+                    else:
+                        mask = np.zeros(values.shape, dtype=bool)
+                        mask[:, br[0] - 1 : br[1]] = True
+                    ki, bi = np.nonzero(mask)
+                    with output_file(args.output) as tmp:
+                        np.savetxt(
+                            tmp,
+                            np.column_stack((k[ki], bi + 1, values[ki, bi])),
+                            header="kx ky kz band_1based energy_eV",
+                        )
+                    return
             with output_file(args.output) as tmp:
                 np.savetxt(
                     tmp,

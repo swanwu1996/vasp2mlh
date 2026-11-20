@@ -41,7 +41,23 @@ def metadata(path):
         "LDAU",
         "LASPH",
         "LMAXMIX",
+        "LUSE_VDW",
+        "LSPIRAL",
+        "EFIELD",
+        "LDIPOL",
+        "IDIPOL",
+        "LMIXTAU",
         "XC",
+        "ALDAX",
+        "ALDAC",
+        "AGGAX",
+        "AGGAC",
+        "AEXX",
+        "PARAM1",
+        "PARAM2",
+        "GGA_COMPAT",
+        "VOSKOWN",
+        "ADDGRID",
         "NGX",
         "NGY",
         "NGZ",
@@ -51,8 +67,11 @@ def metadata(path):
     }
     operator_parameters = {
         node.attrib["name"].strip(): (node.text or "").strip().upper()
-        for node in params.iter()
+        for section in (root.find("incar"), params)
+        if section is not None
+        for node in section.iter()
         if node.attrib.get("name", "").strip() in operator_names
+        or node.attrib.get("name", "").strip().startswith("LIBXC")
     }
     types = root.findall("./atominfo/array[@name='atomtypes']/set/rc")
     neutral = sum(int(row[0].text) * float(row[3].text) for row in types)
@@ -71,6 +90,9 @@ def metadata(path):
         saxis=list(map(float, param("SAXIS").split())),
         nspin=int(param("ISPIN")),
         icharg=int(param("ICHARG")),
+        writes_charge=params.findtext(".//*[@name='LCHARG']", "").strip() == "T",
+        final_scf_steps=len(last.findall("scstep")),
+        nelm=int(params.findtext(".//*[@name='NELM']", "0")),
         encut=float(param("ENMAX")),
         lreal=param("LREAL"),
         spline=param("NLSPLINE") == "T",
