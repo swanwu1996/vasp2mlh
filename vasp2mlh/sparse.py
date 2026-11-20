@@ -56,6 +56,7 @@ def sparsify(
     max_band_change=None,
     extra_points=None,
     band_range=None,
+    spinless_time_reversal=False,
 ):
     if Path(model).resolve() == Path(output).resolve():
         raise ValueError("Use a separate destination for the sparse model")
@@ -65,6 +66,15 @@ def sparsify(
     with h5py.File(model) as src:
         if src.attrs["format"] != "vasp2mlh/1":
             raise ValueError("Expected an untruncated VASP2MLH projection file")
+        if spinless_time_reversal and (
+            src.attrs["spinor"]
+            or src.attrs["spin_channels"] != 1
+            or src.attrs.get("soc", False)
+        ):
+            raise ValueError(
+                "Spinless time reversal requires a nonmagnetic scalar model in a real AO basis"
+            )
+        imag_h = imag_s = 0.0
         atoms = structure(src)
         pairs = {key: (h, s) for key, h, s in pair_blocks(src)}
         keys, hs, ss = [], [], []
@@ -80,6 +90,11 @@ def sparsify(
             asym_s = max(asym_s, float(np.max(abs(s - adjoint(rs)))))
             h = (h + adjoint(rh)) / 2
             s = (s + adjoint(rs)) / 2
+            if spinless_time_reversal:
+                # In the real tesseral AO gauge, (M(k) + M(-k)*)/2 is Re M(R).
+                imag_h = max(imag_h, float(np.max(np.abs(h.imag))))
+                imag_s = max(imag_s, float(np.max(np.abs(s.imag))))
+                h, s = h.real, s.real
             x, y, z, i, j = key
             dr = (
                 atoms.positions[j]
@@ -134,6 +149,12 @@ def sparsify(
                 s_tol=s_tol,
                 max_allowed_band_change_eV=max_band_change,
             )
+            if spinless_time_reversal:
+                report.update(
+                    spinless_time_reversal=True,
+                    removed_imag_H_max_eV=imag_h,
+                    removed_imag_S_max=imag_s,
+                )
             grid = src["k/points"][:]
             report["mesh"] = compare(
                 src, out, grid, src["k/H"][:], src["k/S"][:], band_range

@@ -62,6 +62,11 @@ def main():
         metavar=("FIRST", "LAST"),
         help="enforce error limit over these 1-based bands; also report full-spectrum change",
     )
+    sparse.add_argument(
+        "--spinless-time-reversal",
+        action="store_true",
+        help="enforce H(k)=H(-k)* and S(k)=S(-k)* for an explicitly nonmagnetic scalar calculation; validate the resulting spectral change",
+    )
     check = subs.add_parser(
         "validate", help="summarize PAW, Fourier, band and spilling diagnostics"
     )
@@ -163,6 +168,7 @@ def main():
                         args.max_band_change,
                         extra,
                         args.band_range,
+                        args.spinless_time_reversal,
                     ),
                     indent=2,
                 )

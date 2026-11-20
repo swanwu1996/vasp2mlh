@@ -66,6 +66,14 @@ class SparseTests(unittest.TestCase):
                 )
                 with self.assertRaisesRegex(ValueError, "Band range"):
                     sparsify(src, out, band_range=[1, dim + 1])
+                if spinor or channels > 1:
+                    with self.assertRaisesRegex(ValueError, "nonmagnetic scalar"):
+                        sparsify(src, out, spinless_time_reversal=True)
+                else:
+                    real_report = sparsify(src, out, spinless_time_reversal=True)
+                    self.assertGreater(real_report["removed_imag_H_max_eV"], 0)
+                    with h5py.File(out) as real:
+                        self.assertTrue(np.isrealobj(real["pairs/H"][:]))
                 before = out.read_bytes()
                 with self.assertRaisesRegex(ValueError, "band change"):
                     sparsify(src, out, cutoff=1.0, max_band_change=1e-6)
