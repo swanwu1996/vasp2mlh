@@ -6,25 +6,25 @@ from pathlib import Path
 
 import h5py
 import numpy as np
-from scipy.linalg import eigvalsh
+from scipy.linalg import block_diag, eigvalsh
 
 from vasp2mlh.band_release import check_source, independent_points, window_mask
 
 from vasp2mlh.basis import read_potcar
 from vasp2mlh.calibrate import metric_factors
-from vasp2mlh.model import adjoint, ao_and_metric
+from vasp2mlh.model import adjoint, ao_and_metric, spin_rotation
 from vasp2mlh.pipeline import file_sha256
 from vasp2mlh.realspace import matrices_k, structure
 from vasp2mlh.registry import read_shells
-from vasp2mlh.vasp import Wavecar, is_hybrid, metadata, plane_waves
+from vasp2mlh.vasp import Wavecar, metadata, plane_waves, spectral_mode
 
 
 def reference_records(meta, wave):
-    if is_hybrid(meta):
+    if spectral_mode(meta):
         holdout = meta.get("zero_weight")
         if holdout is None:
             raise ValueError(
-                "A scalar hybrid action check requires independent zero-weight WAVECAR records in the same SCF"
+                "A spectral action check requires independent zero-weight WAVECAR records in the same SCF"
             )
         if wave.nk != meta["wave_nk"]:
             raise ValueError("Different WAVECAR and XML k-point counts")
@@ -39,7 +39,8 @@ def audit(run, models, energy_window=None, band_range=None):
     ref = metadata(run / "vasprun.xml")
     wave = Wavecar(run / "WAVECAR")
     pots = read_potcar(run / "POTCAR")
-    n = int(ref["nelect"] / 2)
+    spinor = ref["spinor"]
+    n = int(ref["nelect"] / (1 if spinor else 2))
     if band_range is None:
         band_range = (n - 1, n + 2) if energy_window is None else None
     if band_range is not None and (
@@ -50,9 +51,9 @@ def audit(run, models, energy_window=None, band_range=None):
         not np.isfinite(energy_window).all() or energy_window[0] >= energy_window[1]
     ):
         raise ValueError("Energy window must have finite, increasing bounds")
-    if ref["spinor"] or wave.ns != 1:
-        raise ValueError("Operator action currently requires a scalar reference")
-    spectral = is_hybrid(ref)
+    if wave.ns != 1:
+        raise ValueError("Expected a single scalar or spinor WAVECAR channel")
+    spectral = spectral_mode(ref)
     if spectral:
         check_source(ref, run)
     samples, records = reference_records(ref, wave)
@@ -67,7 +68,8 @@ def audit(run, models, energy_window=None, band_range=None):
                 f.attrs["metric"] != "ordinary"
                 or not np.isclose(ref["encut"], f.attrs["encut_eV"])
                 or not np.isclose(ref["nelect"], f.attrs["nelect"])
-                or f.attrs["spinor"]
+                or bool(f.attrs["spinor"]) != spinor
+                or (spinor and not np.allclose(f.attrs["saxis"], [0, 0, 1]))
                 or f.attrs["spin_channels"] != 1
                 or not np.array_equal(a.numbers, ref["atoms"].numbers)
                 or not np.allclose(
@@ -84,12 +86,14 @@ def audit(run, models, energy_window=None, band_range=None):
                     or provenance["input_sha256"]["WAVECAR"] != reference_hash
                 ):
                     raise ValueError(
-                        "Hybrid operator action requires the model's exact source XML and WAVECAR"
+                        "Spectral operator action requires the model's exact source XML and WAVECAR"
                     )
             elif f.attrs["charge_density_sha256"] != reference_hash:
                 raise ValueError("Fixed reference density differs from model")
             basis = {s: read_shells(g) for s, g in f["basis"].items()}
-            indices = independent_points(f["k/points"][:], samples["kpoints"])
+            indices = independent_points(
+                f["k/points"][:], samples["kpoints"], time_reversal=not spinor
+            )
             h, s = matrices_k(f, samples["kpoints"][indices])
             residual = []
             within = []
@@ -111,7 +115,8 @@ def audit(run, models, energy_window=None, band_range=None):
                     raise ValueError(
                         "Independent eigenpairs differ between XML and WAVECAR"
                     )
-                levels = eigvalsh(h[0, i], s[i])
+                ordinary = block_diag(s[i], s[i]) if spinor else s[i]
+                levels = eigvalsh(h[0, i], ordinary)
                 mask = window_mask(e[:, 0][None], levels[None], band_range, window)
                 selected = np.flatnonzero(mask[0])
                 if not len(selected):
@@ -126,7 +131,12 @@ def audit(run, models, energy_window=None, band_range=None):
                 )
                 sp = phi + p @ (d @ (adjoint(p) @ phi))
                 _, ip = metric_factors(adjoint(phi) @ sp)
-                v = ip @ (adjoint(sp) @ c[:, selected])
+                components = np.split(c[:, selected], 2 if spinor else 1)
+                v = np.vstack([ip @ (adjoint(sp) @ part) for part in components])
+                if spinor:
+                    v = (spin_rotation(ref["saxis"]) @ v.reshape(2, -1)).reshape(
+                        v.shape
+                    )
                 # Closest orthonormal frame to the selected projected reference columns.
                 left, singular, right = np.linalg.svd(v, full_matrices=False)
                 if singular[-1] < 1e-6:
@@ -134,6 +144,8 @@ def audit(run, models, energy_window=None, band_range=None):
                 weights.append(float(singular[-1] ** 2))
                 q = left @ right
                 _, ia = metric_factors(s[i])
+                if spinor:
+                    ia = block_diag(ia, ia)
                 delta = ia @ h[0, i] @ ia @ q - q * e[selected, 0]
                 residual.extend(np.linalg.norm(delta, axis=0))
                 projected = adjoint(q) @ delta
@@ -150,6 +162,7 @@ def audit(run, models, energy_window=None, band_range=None):
                 "independent_k": len(indices),
                 "states_scored": len(residual),
                 "reference_kind": samples.get("source", "fixed-density"),
+                "spinor": bool(spinor),
                 "band_range_1based": band_range,
                 "energy_window_from_source_fermi_eV": energy_window,
                 "min_subspace_weight": min(weights),
