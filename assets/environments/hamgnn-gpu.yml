@@ -21,6 +21,6 @@ dependencies:
       - torch-runstats==0.2.0
       - torch-ema==0.3
       - HamGNN @ git+https://github.com/QuantumLab-ZY/HamGNN.git@64dba1dbf445ccfa2683f560059c3fbca0df624a
-      - vasp2mlh @ git+https://github.com/swanwu1996/vasp2mlh.git@v0.3.1
+      - vasp2mlh @ git+https://github.com/swanwu1996/vasp2mlh.git@v0.3.2
 variables:
   PYTHONNOUSERSITE: '1'

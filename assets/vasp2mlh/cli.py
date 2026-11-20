@@ -19,7 +19,8 @@ from .pipeline import bands, build, validate, output_file
 def make_parser():
     parser = argparse.ArgumentParser(
         prog="v2h",
-        epilog="Run v2h in a directory containing mlh.toml, or pass a JSON/TOML file.",
+        epilog="Run v2h in a directory containing mlh.toml, or pass a JSON/TOML file. "
+        "Use v2h_genbasis to generate the AO basis and v2h_valid for independent validation.",
         description="VASP WAVECAR to PAW-metric AO Hamiltonians",
     )
     from . import __version__
@@ -29,12 +30,12 @@ def make_parser():
     )
     subs = parser.add_subparsers(dest="command", required=True)
     genbasis = subs.add_parser(
-        "genbasis", help="generate basis.h5 from POTCAR",
+        "genbasis", prog="v2h_genbasis", help="generate basis.h5 from POTCAR",
         description="Read ./POTCAR and write ./basis.h5 using paw-compact-v1. "
         "Pass a control file to customize the basis or select legacy paw-native-v1.",
     )
     genbasis.add_argument("config", nargs="?", metavar="basis.toml")
-    valid = subs.add_parser("valid", help="score a saved model against independent VASP bands")
+    valid = subs.add_parser("valid", prog="v2h_valid", help="score a saved model against independent VASP bands")
     valid.add_argument("config", nargs="?", default="mlh.toml", metavar="mlh.toml")
     for sub in (genbasis, valid):
         sub.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
@@ -44,7 +45,7 @@ def make_parser():
     single.add_argument("run", help="VASP directory with a full uniform mesh")
     single.add_argument(
         "--reference",
-        help="off-grid reference for v2h valid (default: RUN/reference)",
+        help="off-grid reference for v2h_valid (default: RUN/reference)",
     )
     single.add_argument(
         "--potential-run", help="matching PAW potential directory (default: RUN)"
@@ -472,21 +473,22 @@ def main(argv=None, *, validation_only=False):
             argv = ["--help"]
     program = "v2h"
     if argv[0] in ("genbasis", "valid"):
-        entry = parser.parse_args(argv)
-        program = f"v2h {entry.command}"
+        entry_parser = commands[argv[0]]
+        entry = entry_parser.parse_args(argv[1:])
+        program = entry_parser.prog
         if entry.config is None:
             argv = ["basis-generate", "basis.h5", "--potcar", "POTCAR"]
         elif Path(entry.config).suffix.lower() in (".json", ".toml"):
             argv = [entry.config]
         else:
-            commands[entry.command].error("Supply a TOML or JSON control file")
+            entry_parser.error("Supply a TOML or JSON control file")
     settings = {}
     try:
         with ExitStack() as stack:
             if len(argv) == 1 and Path(argv[0]).suffix.lower() in (".json", ".toml"):
                 path = Path(argv[0]).resolve()
                 config = load_config(path)
-                if program == "v2h genbasis":
+                if program == "v2h_genbasis":
                     command = config.get("command", "basis-generate")
                     if command != "basis-generate":
                         raise ValueError("Expected a basis-generate configuration")
@@ -500,7 +502,7 @@ def main(argv=None, *, validation_only=False):
                     }
                 else:
                     command = config.get("command", "convert-batch")
-                if program == "v2h valid" and command != "convert":
+                if program == "v2h_valid" and command != "convert":
                     raise ValueError(
                         "Expected a single-structure convert configuration"
                     )
@@ -544,11 +546,11 @@ def main(argv=None, *, validation_only=False):
                 if threads < 1:
                     raise ValueError("threads must be a positive integer")
                 stack.enter_context(threadpool_limits(limits=threads))
-            if program == "v2h valid":
+            if program == "v2h_valid":
                 from .validation import validate_sample
 
                 return validate_sample(args, path)
-            if program == "v2h genbasis":
+            if program == "v2h_genbasis":
                 if "threads" not in settings:
                     stack.enter_context(threadpool_limits(limits=1))
                 execute(parser, args)

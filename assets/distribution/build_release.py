@@ -73,6 +73,8 @@ def main():
         entry = work / "launch.py"
         shutil.copyfile(root / "assets/distribution/launch.py", entry)
         subprocess.run([*args, str(entry)], cwd=work, check=True)
+        for command in ("v2h_valid", "v2h_genbasis"):
+            os.link(product / "v2h", product / command)
         templates = product / "configs"
         templates.mkdir()
         shutil.copy(package / "compact-defaults-v1.toml", templates)
