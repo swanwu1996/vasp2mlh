@@ -10,6 +10,7 @@ from ase.io import write
 
 from vasp2mlh.basis import Shell
 from vasp2mlh.calibrate import align_ritz, calibrate
+from vasp2mlh.filtering import filter_model
 from vasp2mlh.operator import ScalarOperator
 from vasp2mlh.overlap import overlap, quadrature_blocks
 from vasp2mlh.realspace import matrices_k
@@ -67,6 +68,7 @@ class RefinementTests(unittest.TestCase):
                     format="vasp2mlh/1",
                     shells=a.attrs["shells"],
                     nelect=2,
+                    fermi_eV=0.0,
                 )
                 f["k/mesh"] = [1, 1, 1]
                 f["k/points"] = [[0.0, 0.0, 0.0]]
@@ -84,6 +86,14 @@ class RefinementTests(unittest.TestCase):
                 )
                 self.assertEqual(f.attrs["metric"], "ordinary")
                 self.assertAlmostEqual(s.item().real, 1.0, places=5)
+
+            filtered = folder / "filtered.h5"
+            filter_model(raw, ov, filtered, 1.0, 1.0, 1.0, 2.0)
+            with h5py.File(filtered) as f:
+                h, s = matrices_k(f, [[0.17, 0, 0]])
+                np.testing.assert_allclose(h[0], 4 * s, atol=1e-12)
+                np.testing.assert_allclose(f["filter/min_edge_weight"][:], 1.0)
+                self.assertEqual(f.attrs["hamiltonian_method"], "filtered_paw_ritz")
 
     def test_scalar_potential_convolution(self):
         op = ScalarOperator.__new__(ScalarOperator)

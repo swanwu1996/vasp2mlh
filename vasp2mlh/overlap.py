@@ -188,7 +188,11 @@ def overlap(structure_file, config, output, potcar=None, order=None):
         order = 48
         if h5py.is_hdf5(config):
             with h5py.File(config) as registry:
-                if registry.attrs.get("method") in {"paw-native-v1", "paw-compact-v1"}:
+                if registry.attrs.get("method") in {
+                    "paw-native-v1",
+                    "paw-compact-v1",
+                    "paw-spillage-v1",
+                }:
                     order = 96
     atoms = read(structure_file)
     basis = load_basis(

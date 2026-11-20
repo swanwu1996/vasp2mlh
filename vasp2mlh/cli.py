@@ -27,6 +27,12 @@ def main():
         "--layout",
         help="JSON element cutoffs in angstrom and shell multiplicities; omit for the raw PAW baseline",
     )
+    opt = subs.add_parser(
+        "basis-optimize",
+        help="search fixed-layout radial mixtures on a construction WAVECAR",
+    )
+    for arg in ("run", "registry", "config", "output"):
+        opt.add_argument(arg)
     freeze = subs.add_parser(
         "basis-freeze",
         help="freeze normalized radial functions and shell order for a model family",
@@ -80,6 +86,31 @@ def main():
         type=float,
         default=1.0,
         help="Gaussian Ritz alignment width in eV; zero preserves Ritz eigenvectors",
+    )
+    filt = subs.add_parser(
+        "filter", help="build a spectrally filtered scalar PAW Ritz model"
+    )
+    filt.add_argument("model")
+    filt.add_argument("overlap")
+    filt.add_argument("output")
+    filt.add_argument(
+        "--centre-offset",
+        type=float,
+        required=True,
+        help="filter centre relative to source Fermi energy in eV",
+    )
+    filt.add_argument("--width", type=float, required=True, help="logistic width in eV")
+    filt.add_argument(
+        "--floor",
+        type=float,
+        required=True,
+        help="squared filter amplitude above the band ceiling",
+    )
+    filt.add_argument(
+        "--taper",
+        type=float,
+        default=2.0,
+        help="width of smooth cutoff below the common band ceiling in eV",
     )
     ov = subs.add_parser(
         "overlap",
@@ -208,6 +239,15 @@ def main():
             from .atomic import generate
 
             generate(args.output, args.potcar, args.layout)
+        elif args.command == "basis-optimize":
+            from .spillage import optimize
+
+            print(
+                json.dumps(
+                    optimize(args.run, args.registry, args.config, args.output),
+                    indent=2,
+                )
+            )
         elif args.command == "basis-freeze":
             from .registry import freeze
 
@@ -227,6 +267,18 @@ def main():
                 args.output,
                 args.bands,
                 width=args.alignment_width,
+            )
+        elif args.command == "filter":
+            from .filtering import filter_model
+
+            filter_model(
+                args.model,
+                args.overlap,
+                args.output,
+                args.centre_offset,
+                args.width,
+                args.floor,
+                args.taper,
             )
         elif args.command == "overlap":
             from .overlap import overlap

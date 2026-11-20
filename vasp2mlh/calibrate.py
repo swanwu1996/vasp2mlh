@@ -65,6 +65,60 @@ def align_ritz(ritz, reference, projected, plateau, degeneracy, width):
     return levels, np.empty((0, 0), complex), 0.0
 
 
+def ordinary_geometry(src, ov):
+    atoms = structure(src)
+    geom = structure(ov)
+    shells = json.loads(src.attrs["shells"])
+    if (
+        list(atoms.numbers) != list(geom.numbers)
+        or not np.allclose(atoms.cell, geom.cell, atol=1e-7, rtol=0)
+        or not np.allclose(
+            src["structure/fractional"],
+            ov["structure/fractional"],
+            atol=1e-7,
+            rtol=0,
+        )
+        or shells != json.loads(ov.attrs["shells"])
+    ):
+        raise ValueError(
+            "Overlap and source must have the same structure, cell representatives and shells"
+        )
+    for sym, spec in shells.items():
+        for i in range(len(spec)):
+            for field in ["r", "R"]:
+                key = f"basis/{sym}/{i}/{field}"
+                if not np.array_equal(src[key][:], ov[key][:]):
+                    raise ValueError("Radial basis mismatch")
+    bounds = orbital_bounds(src)
+    r_ao, s_ao = overlap_translations(ov, bounds)
+    k = src["k/points"][:]
+    s_k = bloch(k, r_ao, s_ao)
+    return atoms, bounds, r_ao, s_ao, k, s_k
+
+
+def write_ordinary(out, src, atoms, bounds, r_ao, s_ao, k, s_k, hnew):
+    rh, hr, _ = localized_transform(
+        k, src["k/mesh"][:], atoms, np.diff(bounds), hnew, s_k
+    )
+    translations = np.unique(np.vstack([rh, r_ao]), axis=0)
+    mapping = {tuple(r): i for i, r in enumerate(translations)}
+    out["real/R"] = translations
+    hds = out.create_dataset(
+        "real/H",
+        shape=(1, len(translations), bounds[-1], bounds[-1]),
+        dtype="c16",
+    )
+    sds = out.create_dataset(
+        "real/S", shape=(len(translations), bounds[-1], bounds[-1]), dtype="f8"
+    )
+    for i, r in enumerate(rh):
+        hds[0, mapping[tuple(r)]] = hr[0, i]
+    for i, r in enumerate(r_ao):
+        sds[mapping[tuple(r)]] = s_ao[i]
+    out["k/H"][:] = hnew
+    out["k/S"][:] = s_k
+
+
 def calibrate(model, overlap_file, output, plateau=None, degeneracy=1e-5, width=1.0):
     if Path(output).resolve() in {Path(model).resolve(), Path(overlap_file).resolve()}:
         raise ValueError("Choose a separate output")
@@ -82,33 +136,7 @@ def calibrate(model, overlap_file, output, plateau=None, degeneracy=1e-5, width=
             raise ValueError(
                 "Expected a direct scalar PAW archive and independent AO overlap file"
             )
-        atoms = structure(src)
-        geom = structure(ov)
-        shells = json.loads(src.attrs["shells"])
-        if (
-            list(atoms.numbers) != list(geom.numbers)
-            or not np.allclose(atoms.cell, geom.cell, atol=1e-7, rtol=0)
-            or not np.allclose(
-                src["structure/fractional"],
-                ov["structure/fractional"],
-                atol=1e-7,
-                rtol=0,
-            )
-            or shells != json.loads(ov.attrs["shells"])
-        ):
-            raise ValueError(
-                "Overlap and source must have the same structure, cell representatives and shells"
-            )
-        for sym, spec in shells.items():
-            for i in range(len(spec)):
-                for field in ["r", "R"]:
-                    key = f"basis/{sym}/{i}/{field}"
-                    if not np.array_equal(src[key][:], ov[key][:]):
-                        raise ValueError("Radial basis mismatch")
-        bounds = orbital_bounds(src)
-        r_ao, s_ao = overlap_translations(ov, bounds)
-        k = src["k/points"][:]
-        s_k = bloch(k, r_ao, s_ao)
+        atoms, bounds, r_ao, s_ao, k, s_k = ordinary_geometry(src, ov)
         hnew = np.empty(src["k/H"].shape, complex)
         nocc = int(np.ceil(src.attrs["nelect"] / 2))
         count = min(src["k/projection"].shape[-2:])
@@ -170,26 +198,7 @@ def calibrate(model, overlap_file, output, plateau=None, degeneracy=1e-5, width=
                         )
                     )
                 )
-            rh, hr, _ = localized_transform(
-                k, src["k/mesh"][:], atoms, np.diff(bounds), hnew, s_k
-            )
-            translations = np.unique(np.vstack([rh, r_ao]), axis=0)
-            mapping = {tuple(r): i for i, r in enumerate(translations)}
-            out["real/R"] = translations
-            hds = out.create_dataset(
-                "real/H",
-                shape=(1, len(translations), bounds[-1], bounds[-1]),
-                dtype="c16",
-            )
-            sds = out.create_dataset(
-                "real/S", shape=(len(translations), bounds[-1], bounds[-1]), dtype="f8"
-            )
-            for i, r in enumerate(rh):
-                hds[0, mapping[tuple(r)]] = hr[0, i]
-            for i, r in enumerate(r_ao):
-                sds[mapping[tuple(r)]] = s_ao[i]
-            out["k/H"][:] = hnew
-            out["k/S"][:] = s_k
+            write_ordinary(out, src, atoms, bounds, r_ao, s_ao, k, s_k, hnew)
             out["calibration/aligned_bands"] = aligned
             out["calibration/min_filtered_singular_value"] = minimum
             out["calibration/edge_subspace_fraction"] = fidelity
