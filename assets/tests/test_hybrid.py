@@ -81,14 +81,17 @@ class HybridTests(unittest.TestCase):
             "<eigenvalues_kpoints_opt><kpoints><varray name='kpointlist'><v>.2 .3 .0</v></varray></kpoints><eigenvalues><array><set><set><set><r>8.5</r><r>9.6</r></set></set></set></array></eigenvalues></eigenvalues_kpoints_opt>"
         )
         src = dict(
-            weights=np.ones(1),
-            kpoints=np.zeros((1, 3)),
-            eig=np.array([[[1.0, 3.0]]]),
+            weights=np.array([0.0, 1.0]),
+            kpoints=np.array([[0.41, 0.0, 0.0], [0.0, 0.0, 0.0]]),
+            eig=np.array([[[5.1, 7.2], [1.0, 3.0]]]),
             mesh=[1, 1, 1],
         )
         split_mesh(src, optional)
         np.testing.assert_array_equal(src["eig"], [[[1.0, 3.0]]])
         np.testing.assert_array_equal(src["holdout"]["eig"], [[[8.5, 9.6]]])
+        np.testing.assert_array_equal(src["zero_weight"]["eig"], [[[5.1, 7.2]]])
+        np.testing.assert_array_equal(src["zero_weight"]["wave_indices"], [0])
+        np.testing.assert_array_equal(src["wave_indices"], [1])
 
     def test_exact_hybrid_eigenpairs_and_energy_origin(self):
         rng = np.random.default_rng(612)
