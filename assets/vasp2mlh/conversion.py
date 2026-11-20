@@ -1,0 +1,93 @@
+"""Single-structure handoff from VASP to a validated MLH sample."""
+
+import json
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+from .atomic import generate
+from .band_release import reconstruct
+from .export import deeph, hamgnn
+
+
+def require_file(path, hint):
+    if not path.is_file() or not path.stat().st_size:
+        raise ValueError(f"Missing or empty {path}. {hint}")
+
+
+def convert_sample(args):
+    run = Path(args.run).resolve()
+    reference = Path(args.reference) if args.reference else run / "reference"
+    potential = Path(args.potential_run) if args.potential_run else run
+    output = Path(args.output) if args.output else run / "mlh"
+    if output.exists() or output.is_symlink():
+        raise ValueError(
+            f"Output already exists: {output}. Choose a new output directory with --output."
+        )
+    if args.nao_max is not None and args.format != "hamgnn":
+        raise ValueError("nao_max applies to HamGNN export")
+    require_file(
+        run / "WAVECAR",
+        "Generate a full uniform complex WAVECAR with LWAVE=T and LREAL=F.",
+    )
+    for directory, names, hint in (
+        (
+            run,
+            ("POTCAR", "CHGCAR", "vasprun.xml"),
+            "Use the matching source calculation.",
+        ),
+        (
+            potential,
+            ("vaspout.h5", "POTCAR", "CHGCAR", "vasprun.xml"),
+            "Use a matching WRT_POTENTIAL=total paw calculation.",
+        ),
+        (
+            reference,
+            ("vasprun.xml", "POTCAR", "CHGCAR"),
+            "Supply a matching off-grid ICHARG=11 calculation with --reference.",
+        ),
+    ):
+        for name in names:
+            require_file(directory / name, hint)
+    registry = Path(args.registry) if args.registry else run / "basis.h5"
+    native = not args.registry and not registry.exists() and not registry.is_symlink()
+    if not native:
+        require_file(registry, "Supply a frozen AO registry with --registry.")
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with TemporaryDirectory(dir=output.parent) as staging:
+        result = Path(staging) / "result"
+        result.mkdir()
+        if native:
+            registry = result / "basis.h5"
+            generate(registry, [run / "POTCAR"])
+        window = args.energy_window
+        if window is None and args.band_range is None:
+            window = [-1.0, 2.0]
+        model = result / "model.h5"
+        report = reconstruct(
+            run,
+            registry,
+            reference,
+            model,
+            potential_run=potential,
+            mesh=args.mesh,
+            band_range=args.band_range,
+            energy_window=window,
+            cutoff=args.cutoff,
+            max_rmse=args.max_rmse,
+            max_error=args.max_error,
+        )
+        if args.format == "deeph":
+            sample = Path("deeph/0")
+            deeph(model, result / sample, registry)
+        else:
+            sample = Path("graph_data.npz")
+            hamgnn([model], result / sample, args.nao_max or 14, registry)
+        (result / "validation.json").write_text(
+            json.dumps(report, indent=2, allow_nan=False) + "\n"
+        )
+        result.rename(output)
+    print(f"{args.format} sample: {(output / sample).absolute()}")
+    print(
+        f"Independent band error: RMS {1000 * report['rmse_eV']:.3f} meV, maximum {1000 * report['max_error_eV']:.3f} meV"
+    )

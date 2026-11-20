@@ -73,7 +73,7 @@ def main():
         subprocess.run([*args, str(entry)], cwd=work, check=True)
         templates = product / "configs"
         templates.mkdir()
-        for filename in ("validated.toml", "projection.json", "basis.toml", "layout.toml", "bands.toml", "report.json", "deeph.toml"):
+        for filename in ("mlh.toml", "validated.toml", "projection.json", "basis.toml", "layout.toml", "bands.toml", "report.json", "deeph.toml"):
             shutil.copyfile(root / "configs" / filename, templates / filename)
         target = dist / (name + ".tar.gz")
         packed = work / target.name

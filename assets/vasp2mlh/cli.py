@@ -27,6 +27,67 @@ def make_parser():
         "--version", action="version", version=f"%(prog)s {__version__}"
     )
     subs = parser.add_subparsers(dest="command", required=True)
+    single = subs.add_parser(
+        "convert", help="convert one VASP run to validated MLH training labels"
+    )
+    single.add_argument("run", help="VASP directory with a full uniform mesh")
+    single.add_argument(
+        "--reference",
+        help="fixed-density validation directory (default: RUN/reference)",
+    )
+    single.add_argument(
+        "--potential-run", help="matching PAW potential directory (default: RUN)"
+    )
+    single.add_argument(
+        "--registry",
+        help="frozen AO basis (default: RUN/basis.h5 if present, otherwise POTCAR native orbitals)",
+    )
+    single.add_argument(
+        "-o", "--output", help="new result directory (default: RUN/mlh)"
+    )
+    single.add_argument("--format", choices=["deeph", "hamgnn"], default="deeph")
+    single.add_argument(
+        "--nao-max",
+        type=int,
+        choices=[14, 19, 26],
+        help="HamGNN orbital mask size (default: 14)",
+    )
+    window = single.add_mutually_exclusive_group()
+    window.add_argument(
+        "--band-range",
+        type=int,
+        nargs=2,
+        metavar=("FIRST", "LAST"),
+        help="inclusive 1-based band numbers",
+    )
+    window.add_argument(
+        "--energy-window",
+        type=float,
+        nargs=2,
+        metavar=("LOW", "HIGH"),
+        help="eV relative to the source Fermi level (default: -1 to +2)",
+    )
+    single.add_argument(
+        "--cutoff", type=float, default=12.0, help="H cutoff in angstrom (default: 12)"
+    )
+    single.add_argument(
+        "--max-rmse",
+        type=float,
+        default=0.010,
+        help="RMS error limit in eV (default: 0.010)",
+    )
+    single.add_argument(
+        "--max-error",
+        type=float,
+        default=0.050,
+        help="maximum absolute error in eV (default: 0.050)",
+    )
+    single.add_argument(
+        "--mesh",
+        type=int,
+        nargs=3,
+        help="dimensions for an explicitly listed uniform grid",
+    )
     bulk = subs.add_parser(
         "convert-batch",
         help="convert VASP directories in a JSON manifest to sparse HDF5 models",
@@ -366,6 +427,7 @@ def main(argv=None):
 
     parser, commands = make_parser()
     argv = sys.argv[1:] if argv is None else argv
+    settings = {}
     try:
         with ExitStack() as stack:
             if len(argv) == 1 and Path(argv[0]).suffix.lower() in (".json", ".toml"):
@@ -398,6 +460,8 @@ def main(argv=None):
                         )
             else:
                 args = parser.parse_args(argv)
+            if args.command == "convert" and "threads" not in settings:
+                stack.enter_context(threadpool_limits(limits=1))
             return execute(parser, args)
     except (
         ValueError,
@@ -412,7 +476,11 @@ def main(argv=None):
 
 
 def execute(parser, args):
-    if args.command == "convert-batch":
+    if args.command == "convert":
+        from .conversion import convert_sample
+
+        convert_sample(args)
+    elif args.command == "convert-batch":
         from .batch import run_batch
 
         summary = run_batch(
