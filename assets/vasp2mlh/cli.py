@@ -28,12 +28,12 @@ def make_parser():
     )
     subs = parser.add_subparsers(dest="command", required=True)
     single = subs.add_parser(
-        "convert", help="convert one VASP run to validated MLH training labels"
+        "convert", help="convert one VASP run to MLH training labels"
     )
     single.add_argument("run", help="VASP directory with a full uniform mesh")
     single.add_argument(
         "--reference",
-        help="fixed-density validation directory (default: RUN/reference)",
+        help="off-grid reference for vasp2mlh_valid (default: RUN/reference)",
     )
     single.add_argument(
         "--potential-run", help="matching PAW potential directory (default: RUN)"
@@ -43,7 +43,11 @@ def make_parser():
         help="frozen AO basis (default: RUN/basis.h5 if present, otherwise POTCAR native orbitals)",
     )
     single.add_argument(
-        "-o", "--output", help="new result directory (default: RUN/mlh)"
+        "-o",
+        "--output-dir",
+        "--output",
+        dest="output_dir",
+        help="new result directory (default: RUN/mlh)",
     )
     single.add_argument(
         "--threads",
@@ -420,7 +424,24 @@ def make_parser():
     return parser, subs.choices
 
 
-def main(argv=None):
+def valid_main(argv=None):
+    from . import __version__
+
+    parser = argparse.ArgumentParser(
+        prog="vasp2mlh_valid",
+        description="Check an existing sparse model against independent VASP bands",
+    )
+    parser.add_argument(
+        "--version", action="version", version=f"%(prog)s {__version__}"
+    )
+    parser.add_argument("config", help="same conversion TOML or JSON used by vasp2mlh")
+    path = parser.parse_args(argv).config
+    if Path(path).suffix.lower() not in (".json", ".toml"):
+        parser.error("Supply the conversion TOML or JSON")
+    return main([path], validation_only=True)
+
+
+def main(argv=None, *, validation_only=False):
     from contextlib import ExitStack
     from threadpoolctl import threadpool_limits
     from .configuration import (
@@ -439,6 +460,10 @@ def main(argv=None):
                 path = Path(argv[0]).resolve()
                 config = load_config(path)
                 command = config.get("command", "convert-batch")
+                if validation_only and command != "convert":
+                    raise ValueError(
+                        "Expected a single-structure convert configuration"
+                    )
                 if command == "convert-batch":
                     args = parser.parse_args(["convert-batch", str(path)])
                 else:
@@ -454,7 +479,7 @@ def main(argv=None):
                     )
                     stack.callback(os.chdir, Path.cwd())
                     os.chdir(path.parent)
-                    for name in ("output", "destination"):
+                    for name in ("output", "output_dir", "destination"):
                         dest = getattr(args, name, None)
                         if dest is not None and Path(dest).resolve() == path:
                             raise ValueError("Output collides with control file")
@@ -478,6 +503,10 @@ def main(argv=None):
                 if threads < 1:
                     raise ValueError("threads must be a positive integer")
                 stack.enter_context(threadpool_limits(limits=threads))
+            if validation_only:
+                from .validation import validate_sample
+
+                return validate_sample(args, path)
             return execute(parser, args)
     except (
         ValueError,
@@ -488,7 +517,8 @@ def main(argv=None):
         ImportError,
         np.linalg.LinAlgError,
     ) as exc:
-        parser.exit(2, f"vasp2mlh: {exc}\n")
+        program = "vasp2mlh_valid" if validation_only else parser.prog
+        parser.exit(2, f"{program}: {exc}\n")
 
 
 def execute(parser, args):

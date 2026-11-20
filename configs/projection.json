@@ -2,7 +2,7 @@
   "command": "convert-batch",
   "mode": "projection",
   "registry": "basis.h5",
-  "output": "projection-models",
+  "output_dir": "projection-models",
   "workers": 2,
   "threads": 1,
   "backend": "auto",

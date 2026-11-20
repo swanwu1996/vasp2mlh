@@ -145,6 +145,33 @@ def score_window(
     return summary, pairs
 
 
+def reference_data(src, reference, hashes):
+    ref = metadata(reference / "vasprun.xml")
+    check_scalar(ref)
+    check_convergence(ref, reference)
+    if ref["icharg"] != 11:
+        raise ValueError("Use an ICHARG=11 fixed-density validation run")
+    a, b = src["atoms"], ref["atoms"]
+    if (
+        not np.array_equal(a.numbers, b.numbers)
+        or not np.allclose(a.cell, b.cell, atol=1e-7, rtol=0)
+        or not periodic_match(a.get_scaled_positions(), b.get_scaled_positions()).all()
+        or not np.isclose(src["nelect"], ref["nelect"], atol=1e-7, rtol=0)
+        or not np.isclose(src["encut"], ref["encut"], atol=1e-7, rtol=0)
+        or src["operator_parameters"] != ref["operator_parameters"]
+        or src["spline"] != ref["spline"]
+        or src["titles"] != ref["titles"]
+    ):
+        raise ValueError(
+            "Validation structure, PAW, electron count, cutoff or operator settings differ from source"
+        )
+    for name in ("POTCAR", "CHGCAR"):
+        if file_sha256(reference / name) != hashes[name]:
+            raise ValueError(f"Validation {name} differs from source")
+    selected = independent_points(src["kpoints"], ref["kpoints"])
+    return ref, selected
+
+
 def reconstruct(
     run,
     registry,
@@ -183,10 +210,11 @@ def reconstruct(
             "Use a positive finite cutoff and finite nonnegative release tolerances"
         )
 
-    run, registry, reference, output = map(Path, (run, registry, reference, output))
+    run, registry, output = map(Path, (run, registry, output))
+    reference = Path(reference) if reference is not None else None
     potential = Path(potential_run) if potential_run else run
     inputs = {registry.resolve()}
-    for directory in (run, reference, potential):
+    for directory in {run, potential, reference} - {None}:
         inputs.update(
             (directory / n).resolve()
             for n in (
@@ -205,43 +233,26 @@ def reconstruct(
     if output.resolve() in inputs:
         raise ValueError("Model output collides with an input")
     src = metadata(run / "vasprun.xml")
-    ref = metadata(reference / "vasprun.xml")
-    for meta, directory in ((src, run), (ref, reference)):
-        check_scalar(meta)
-        check_convergence(meta, directory)
+    check_scalar(src)
+    check_convergence(src, run)
     if src["icharg"] != 11 and not (
         src["icharg"] in (0, 1, 2) and src["writes_charge"]
     ):
         raise ValueError("Source must use ICHARG=11 or write its converged SCF density")
-    if ref["icharg"] != 11:
-        raise ValueError("Use an ICHARG=11 fixed-density validation run")
-    a, b = src["atoms"], ref["atoms"]
-    if (
-        not np.array_equal(a.numbers, b.numbers)
-        or not np.allclose(a.cell, b.cell, atol=1e-7, rtol=0)
-        or not periodic_match(a.get_scaled_positions(), b.get_scaled_positions()).all()
-        or not np.isclose(src["nelect"], ref["nelect"], atol=1e-7, rtol=0)
-        or not np.isclose(src["encut"], ref["encut"], atol=1e-7, rtol=0)
-        or src["operator_parameters"] != ref["operator_parameters"]
-        or src["spline"] != ref["spline"]
-        or src["titles"] != ref["titles"]
-    ):
-        raise ValueError(
-            "Validation structure, PAW, electron count, cutoff or operator settings differ from source"
-        )
-    hashes = {}
-    for name in ("POTCAR", "CHGCAR"):
-        hashes[name] = file_sha256(run / name)
-        if file_sha256(reference / name) != hashes[name]:
-            raise ValueError(f"Validation {name} differs from source")
-    selected = independent_points(src["kpoints"], ref["kpoints"])
-    points = ref["kpoints"][selected]
-    ref_levels = ref["eig"][0, selected]
+    hashes = {name: file_sha256(run / name) for name in ("POTCAR", "CHGCAR")}
+    if reference is not None:
+        ref, selected = reference_data(src, reference, hashes)
+        points = ref["kpoints"][selected]
+        ref_levels = ref["eig"][0, selected]
+    a = src["atoms"]
     fixed = read_registry(registry, a.get_chemical_symbols())
     expected = {s: fingerprint(v) for s, v in fixed.items()}
     source_bands = src["eig"].shape[-1]
-    if band_range is not None and not 1 <= band_range[0] <= band_range[1] <= min(
-        source_bands, ref_levels.shape[1]
+    if reference is not None:
+        source_bands = min(source_bands, ref_levels.shape[1])
+    if (
+        band_range is not None
+        and not 1 <= band_range[0] <= band_range[1] <= source_bands
     ):
         raise ValueError("Band range exceeds the available VASP spectrum")
     abs_window = (
@@ -303,18 +314,6 @@ def reconstruct(
                 raise ValueError("Source PAW or density changed during reconstruction")
             basis = inspect_basis(model, expected)
             if on_stage is not None:
-                on_stage("Validate off-grid bands")
-            independent, observations = score_window(
-                model,
-                points,
-                ref_levels,
-                band_range,
-                abs_window,
-                max_rmse,
-                max_error,
-                independent=True,
-            )
-            if on_stage is not None:
                 on_stage("Validate source mesh")
             mesh_score, mesh_pairs = score_window(
                 model,
@@ -329,7 +328,9 @@ def reconstruct(
             report = dict(
                 profile="scalar-band-reconstruction/1",
                 version=__version__,
-                status="passed",
+                status="source_mesh_passed"
+                if mesh_score["observations"]
+                else "source_mesh_no_states",
                 band_range_1based=band_range,
                 energy_window_from_source_fermi_eV=energy_window,
                 energy_window_absolute_eV=abs_window,
@@ -339,17 +340,13 @@ def reconstruct(
                 mesh=model["k/mesh"][:].tolist(),
                 basis=basis,
                 cutoff_reference_eV=float(model.attrs["interpolation_reference_eV"]),
-                independent_k=len(points),
-                reference_k_total=len(ref["kpoints"]),
                 source_mesh_score=mesh_score,
-                **independent,
                 rmse_limit_eV=max_rmse,
                 max_limit_eV=max_error,
                 registry_sha256=json.loads(model.attrs["basis_config"])[
                     "registry_sha256"
                 ],
                 source_xml_sha256=file_sha256(run / "vasprun.xml"),
-                reference_xml_sha256=file_sha256(reference / "vasprun.xml"),
                 operator_settings=src["operator_parameters"],
                 filter_parameters={
                     name: float(model.attrs[name])
@@ -363,12 +360,34 @@ def reconstruct(
                 },
                 input_sha256=hashes,
             )
-            group = model.create_group("band_validation")
+            if reference is None:
+                group = model.create_group("source_validation")
+            else:
+                if on_stage is not None:
+                    on_stage("Validate off-grid bands")
+                independent, observations = score_window(
+                    model,
+                    points,
+                    ref_levels,
+                    band_range,
+                    abs_window,
+                    max_rmse,
+                    max_error,
+                    independent=True,
+                )
+                report.update(
+                    status="passed",
+                    independent_k=len(points),
+                    reference_k_total=len(ref["kpoints"]),
+                    reference_xml_sha256=file_sha256(reference / "vasprun.xml"),
+                    **independent,
+                )
+                group = model.create_group("band_validation")
+                group["kpoints"] = points
+                group["reference_k_index"] = selected
+                for name, values in observations.items():
+                    group[name] = values
             group.attrs["report"] = json.dumps(report, allow_nan=False)
-            group["kpoints"] = points
-            group["reference_k_index"] = selected
-            for name, values in observations.items():
-                group[name] = values
             mesh_group = group.create_group("source_mesh")
             for name, values in mesh_pairs.items():
                 mesh_group[name] = values

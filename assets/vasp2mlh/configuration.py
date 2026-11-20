@@ -80,6 +80,11 @@ def operation_args(command, parser, values):
 
     if not isinstance(values, dict):
         raise ValueError("parameters must be a table")
+    if command == "convert" and "output" in values:
+        values = dict(values)
+        if "output_dir" in values and values["output_dir"] != values["output"]:
+            raise ValueError("Conflicting output_dir and legacy output paths")
+        values["output_dir"] = values.pop("output")
     actions = {a.dest: a for a in parser._actions if a.dest != "help"}
     unknown = values.keys() - actions.keys()
     if unknown:

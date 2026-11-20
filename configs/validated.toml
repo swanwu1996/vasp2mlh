@@ -1,7 +1,7 @@
 command = "convert-batch"
 mode = "validated"
 registry = "basis.h5"
-output = "models"
+output_dir = "models"
 
 workers = 2
 threads = 1

@@ -18,12 +18,11 @@ def require_file(path, hint):
 
 def convert_sample(args):
     run = Path(args.run).resolve()
-    reference = Path(args.reference) if args.reference else run / "reference"
     potential = Path(args.potential_run) if args.potential_run else run
-    output = Path(args.output) if args.output else run / "mlh"
+    output = Path(args.output_dir) if args.output_dir else run / "mlh"
     if output.exists() or output.is_symlink():
         raise ValueError(
-            f"Output already exists: {output}. Choose a new output directory with --output."
+            f"Output already exists: {output}. Choose a new output directory with --output-dir."
         )
     if args.nao_max is not None and args.format != "hamgnn":
         raise ValueError("nao_max applies to HamGNN export")
@@ -42,11 +41,6 @@ def convert_sample(args):
             ("vaspout.h5", "POTCAR", "CHGCAR", "vasprun.xml"),
             "Use a matching WRT_POTENTIAL=total paw calculation.",
         ),
-        (
-            reference,
-            ("vasprun.xml", "POTCAR", "CHGCAR"),
-            "Supply a matching off-grid ICHARG=11 calculation with --reference.",
-        ),
     ):
         for name in names:
             require_file(directory / name, hint)
@@ -56,10 +50,10 @@ def convert_sample(args):
         require_file(registry, "Supply a frozen AO registry with --registry.")
 
     output.parent.mkdir(parents=True, exist_ok=True)
-    # AO preparation, seven reconstruction stages and the final sample export.
+    # AO preparation, six reconstruction stages and the final sample export.
     with (
         TemporaryDirectory(dir=output.parent) as staging,
-        progress_bar("Prepare AO basis", 9, "stage") as bar,
+        progress_bar("Prepare AO basis", 8, "stage") as bar,
     ):
         progress = ConversionProgress(bar)
         result = Path(staging) / "result"
@@ -74,7 +68,7 @@ def convert_sample(args):
         report = reconstruct(
             run,
             registry,
-            reference,
+            None,
             model,
             potential_run=potential,
             mesh=args.mesh,
@@ -93,12 +87,9 @@ def convert_sample(args):
         else:
             sample = Path("graph_data.npz")
             hamgnn([model], result / sample, args.nao_max or 14, registry)
-        (result / "validation.json").write_text(
+        (result / "source_validation.json").write_text(
             json.dumps(report, indent=2, allow_nan=False) + "\n"
         )
         result.rename(output)
         bar.update(1)
     print(f"{args.format} sample: {(output / sample).absolute()}")
-    print(
-        f"Independent band error: RMS {1000 * report['rmse_eV']:.3f} meV, maximum {1000 * report['max_error_eV']:.3f} meV"
-    )

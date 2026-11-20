@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vasp2mlh"
-version = "0.6.2"
+version = "0.7.0"
 description = "PAW-metric projection of VASP wavefunctions onto numerical atomic orbitals"
 readme = {text = "Middleware for constructing and validating sparse local-orbital Hamiltonian and overlap matrices from VASP PAW wavefunctions.", content-type = "text/plain"}
 requires-python = ">=3.10"
@@ -15,6 +15,7 @@ pyg = ["torch", "torch-geometric"]
 
 [project.scripts]
 vasp2mlh = "vasp2mlh.cli:main"
+vasp2mlh_valid = "vasp2mlh.cli:valid_main"
 
 [tool.setuptools]
 package-dir = {"" = "assets"}

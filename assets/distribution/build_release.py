@@ -71,6 +71,7 @@ def main():
         entry = work / "launch.py"
         shutil.copyfile(root / "assets/distribution/launch.py", entry)
         subprocess.run([*args, str(entry)], cwd=work, check=True)
+        os.link(product / "vasp2mlh", product / "vasp2mlh_valid")
         templates = product / "configs"
         templates.mkdir()
         for filename in ("mlh.toml", "validated.toml", "projection.json", "basis.toml", "layout.toml", "bands.toml", "report.json", "deeph.toml"):

@@ -75,7 +75,16 @@ def read_jobs(manifest, config=None):
         or mode not in modes
         or config.keys()
         - (
-            {"command", "mode", "registry", "defaults", "jobs", "runtime", "output"}
+            {
+                "command",
+                "mode",
+                "registry",
+                "defaults",
+                "jobs",
+                "runtime",
+                "output",
+                "output_dir",
+            }
             | BATCH_CONTROLS
         )
     ):
@@ -320,9 +329,16 @@ def run_batch(manifest, output=None, workers=None, threads=None, check_only=None
     threads = settings.get("threads", 1) if threads is None else threads
     check_only = settings.get("check_only", False) if check_only is None else check_only
     if output is None:
-        if not isinstance(config.get("output"), str) or not config["output"].strip():
+        if (
+            "output_dir" in config
+            and "output" in config
+            and config["output"] != config["output_dir"]
+        ):
+            raise ValueError("Conflicting output_dir and legacy output paths")
+        destination = config.get("output_dir", config.get("output"))
+        if not isinstance(destination, str) or not destination.strip():
             raise ValueError("Specify the output directory in the configuration")
-        output = manifest.parent / config["output"]
+        output = manifest.parent / destination
     if workers < 1 or threads < 1:
         raise ValueError("Worker and thread counts must be positive")
     jobs = read_jobs(manifest, config)

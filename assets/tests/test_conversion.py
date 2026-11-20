@@ -4,7 +4,11 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from vasp2mlh.cli import main
+import h5py
+import numpy as np
+
+from vasp2mlh.pipeline import file_sha256
+from vasp2mlh.cli import main, valid_main
 from vasp2mlh.configuration import load_config
 
 
@@ -22,11 +26,9 @@ class SingleConversionTests(unittest.TestCase):
         with TemporaryDirectory() as temp:
             root = Path(temp)
             run = root / "source"
-            reference = run / "reference"
-            reference.mkdir(parents=True)
+            run.mkdir()
             for name in ("vasprun.xml", "POTCAR", "CHGCAR"):
                 (run / name).write_text("fixture")
-                (reference / name).write_text("fixture")
             for name in ("WAVECAR", "vaspout.h5"):
                 (run / name).write_text("fixture")
             cfg = root / "mlh.json"
@@ -52,9 +54,68 @@ class SingleConversionTests(unittest.TestCase):
                 main([str(cfg)])
                 generate.assert_called_once()
                 args, kwargs = reconstruct.call_args
-                self.assertEqual(args[1:3], (run / "basis.h5", reference))
+                self.assertEqual(args[1:3], (run / "basis.h5", None))
                 self.assertEqual(kwargs["energy_window"], [-1.0, 2.0])
-                self.assertEqual(load_config(run / "mlh/validation.json"), report)
+                self.assertEqual(
+                    load_config(run / "mlh/source_validation.json"), report
+                )
+                self.assertFalse((run / "mlh/validation.json").exists())
                 with self.assertRaises(SystemExit):
                     main([str(cfg)])
                 self.assertEqual(reconstruct.call_count, 2)
+
+    def test_validator_scores_saved_model_and_replaces_stale_pass_on_failure(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "ref").mkdir()
+            (root / "vasprun.xml").write_text("source")
+            (root / "ref/vasprun.xml").write_text("reference")
+            (root / "results").mkdir()
+            path = root / "results/model.h5"
+            with h5py.File(path, "w") as f:
+                f.create_group("source_validation").attrs["report"] = json.dumps(
+                    {
+                        "source_xml_sha256": file_sha256(root / "vasprun.xml"),
+                        "input_sha256": {},
+                    }
+                )
+            before = file_sha256(path)
+            config = root / "mlh.toml"
+            config.write_text(
+                'command="convert"\n[parameters]\nrun="."\nreference="ref"\noutput_dir="results"\n'
+            )
+            meta = {
+                "kpoints": np.zeros((1, 3)),
+                "eig": np.array([[[0.0, 4.0]]]),
+                "efermi": 0.0,
+            }
+            with (
+                patch("vasp2mlh.validation.metadata", return_value=meta),
+                patch(
+                    "vasp2mlh.validation.reference_data",
+                    return_value=(meta, np.array([0])),
+                ),
+                patch("vasp2mlh.band_release.bands", return_value=meta["eig"] + 0.001),
+            ):
+                valid_main([str(config)])
+                report = root / "results/validation.json"
+                self.assertEqual(load_config(report)["status"], "passed")
+                config.write_text(config.read_text() + "max_rmse=0.0\n")
+                with self.assertRaises(SystemExit):
+                    valid_main([str(config)])
+                failed = load_config(report)
+                self.assertEqual(failed["status"], "failed")
+                self.assertAlmostEqual(failed["rmse_eV"], 0.001)
+                self.assertEqual(file_sha256(path), before)
+
+    def test_output_alias_and_conflict(self):
+        with TemporaryDirectory() as temp, patch("vasp2mlh.cli.execute") as execute:
+            cfg = Path(temp) / "mlh.toml"
+            cfg.write_text(
+                'command="convert"\n[parameters]\nrun="."\noutput="old-name"\n'
+            )
+            main([str(cfg)])
+            self.assertEqual(execute.call_args.args[1].output_dir, "old-name")
+            cfg.write_text(cfg.read_text() + 'output_dir="another-name"\n')
+            with self.assertRaises(SystemExit):
+                main([str(cfg)])
