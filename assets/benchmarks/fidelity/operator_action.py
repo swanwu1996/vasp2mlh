@@ -80,7 +80,12 @@ def audit(run, models, energy_window=None, band_range=None):
             ):
                 raise ValueError("Geometry, metric or PAW differs")
             if spectral:
-                provenance = json.loads(f["source_validation"].attrs["report"])
+                group = (
+                    "source_validation"
+                    if "source_validation" in f
+                    else "band_validation"
+                )
+                provenance = json.loads(f[group].attrs["report"])
                 if (
                     provenance["source_xml_sha256"] != xml_hash
                     or provenance["input_sha256"]["WAVECAR"] != reference_hash
