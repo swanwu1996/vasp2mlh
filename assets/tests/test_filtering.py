@@ -4,12 +4,30 @@ import numpy as np
 from scipy.special import expit
 
 from vasp2mlh.basis import Shell
-from vasp2mlh.calibrate import metric_factors
+from vasp2mlh.calibrate import metric_factors, overlap_mesh_alias
+from vasp2mlh.model import bloch
 from vasp2mlh.filtering import filtered_operator
 from vasp2mlh.spillage import coverage, diffuse_shells, radial_map
 
 
 class FilteringTests(unittest.TestCase):
+    def test_mesh_alias_equals_brillouin_zone_rms(self):
+        exact_r = np.array([[-2, 0, 0], [0, 0, 0], [2, 0, 0]])
+        exact_s = np.array([0.12, 1.0, 0.12])[:, None, None]
+        # On a Gamma-centred three-point mesh the two remote blocks fold to ±1.
+        folded_r = np.array([[1, 0, 0], [0, 0, 0], [-1, 0, 0]])
+        k = np.zeros((31, 3))
+        k[:, 0] = np.arange(len(k)) / len(k)
+        exact = bloch(k, exact_r, exact_s)
+        folded = bloch(k, folded_r, exact_s)
+        expected = np.linalg.norm(folded - exact) / np.linalg.norm(exact)
+        self.assertAlmostEqual(
+            overlap_mesh_alias(folded_r, exact_s, exact_r, exact_s), expected
+        )
+        self.assertEqual(
+            overlap_mesh_alias(exact_r[::-1], exact_s[::-1], exact_r, exact_s), 0
+        )
+
     def test_full_space_ritz_complement_and_energy_zero(self):
         rng = np.random.default_rng(73)
         trial = np.linalg.qr(rng.normal(size=(9, 4)) + 1j * rng.normal(size=(9, 4)))[0]
