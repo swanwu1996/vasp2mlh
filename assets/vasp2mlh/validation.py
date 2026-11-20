@@ -10,7 +10,7 @@ import numpy as np
 from .band_release import reference_data, score_window
 from .configuration import DEFAULT_ENERGY_WINDOW
 from .pipeline import file_sha256, output_file, paths_collide
-from .vasp import is_hybrid, metadata
+from .vasp import spectral_mode, metadata
 
 
 def validate_sample(args, config):
@@ -44,7 +44,7 @@ def validate_sample(args, config):
             if file_sha256(run / "vasprun.xml") != provenance["source_xml_sha256"]:
                 raise ValueError("Source XML differs from the model's recorded source")
             src = metadata(run / "vasprun.xml")
-            if is_hybrid(src) and not args.reference:
+            if spectral_mode(src) and not args.reference:
                 reference = run
             ref, selected = reference_data(src, reference, provenance["input_sha256"])
             limits = (args.max_rmse, args.max_error)

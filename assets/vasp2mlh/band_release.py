@@ -15,7 +15,7 @@ from .overlap import overlap
 from .pipeline import bands, build, file_sha256, output_file
 from .registry import fingerprint, inspect_basis, read_registry
 from .sparse import sparsify
-from .vasp import is_hybrid, metadata
+from .vasp import is_hybrid, spectral_mode, metadata
 
 
 def check_scalar(meta):
@@ -58,7 +58,7 @@ def check_hybrid(meta):
         raise ValueError("Missing or invalid AEXX or HFSCREEN in hybrid XML")
 
 
-def independent_points(source, reference):
+def independent_points(source, reference, *, time_reversal=True):
     """Keep one reference sample per time-reversal pair, modulo reciprocal translations."""
     selected = []
     src = np.asarray(source)
@@ -66,12 +66,13 @@ def independent_points(source, reference):
     if not np.isfinite(ref).all() or not np.isfinite(src).all():
         raise ValueError("Non-finite k coordinates")
     for i, point in enumerate(ref):
-        if periodic_match(src, point).any() or periodic_match(src, -point).any():
+        if periodic_match(src, point).any() or (
+            time_reversal and periodic_match(src, -point).any()
+        ):
             continue
         previous = ref[selected]
-        if (
-            not periodic_match(previous, point).any()
-            and not periodic_match(previous, -point).any()
+        if not periodic_match(previous, point).any() and (
+            not time_reversal or not periodic_match(previous, -point).any()
         ):
             selected.append(i)
     if not selected:
@@ -101,7 +102,7 @@ def check_convergence(meta, directory):
         raise ValueError(
             "Electronic iteration limit reached without confirmed final convergence"
         )
-    if is_hybrid(meta):
+    if spectral_mode(meta):
         delta = meta.get("final_energy_change_eV")
         ediff = meta["ediff_eV"]
         if (
@@ -111,7 +112,7 @@ def check_convergence(meta, directory):
             or delta > ediff + 1.01e-8
         ):
             raise ValueError(
-                "Hybrid SCF convergence is unconfirmed by the final energy change or OUTCAR"
+                "SCF convergence is unconfirmed by the final energy change or OUTCAR"
             )
 
 
@@ -180,20 +181,22 @@ def score_window(
 
 
 def reference_points(src, reference):
-    if is_hybrid(src):
+    if spectral_mode(src):
         xml = reference / "vasprun.xml"
         if xml.resolve() != src["xml_path"] and file_sha256(xml) != file_sha256(
             src["xml_path"]
         ):
             raise ValueError(
-                "Hybrid validation requires the same SCF XML and occupied exchange orbitals"
+                "Spectral validation requires the same SCF XML as the projected orbitals"
             )
         if "holdout" not in src:
             raise ValueError(
-                "Hybrid validation needs KPOINTS_OPT or zero-weight off-grid points in the same SCF"
+                "Spectral validation needs KPOINTS_OPT or zero-weight off-grid points in the same SCF"
             )
         ref = src["holdout"]
-        return ref, independent_points(src["kpoints"], ref["kpoints"])
+        return ref, independent_points(
+            src["kpoints"], ref["kpoints"], time_reversal=not src.get("spinor")
+        )
     ref = metadata(reference / "vasprun.xml")
     check_scalar(ref)
     check_convergence(ref, reference)
@@ -213,15 +216,17 @@ def reference_points(src, reference):
         raise ValueError(
             "Validation structure, PAW, electron count, cutoff or operator settings differ from source"
         )
-    return ref, independent_points(src["kpoints"], ref["kpoints"])
+    return ref, independent_points(
+        src["kpoints"], ref["kpoints"], time_reversal=not src.get("spinor")
+    )
 
 
 def reference_data(src, reference, hashes):
     ref, selected = reference_points(src, reference)
-    for name in ("POTCAR", "WAVECAR") if is_hybrid(src) else ("POTCAR", "CHGCAR"):
+    for name in ("POTCAR", "WAVECAR") if spectral_mode(src) else ("POTCAR", "CHGCAR"):
         if (
             file_sha256(
-                (src["xml_path"].parent if is_hybrid(src) else reference) / name
+                (src["xml_path"].parent if spectral_mode(src) else reference) / name
             )
             != hashes[name]
         ):
@@ -230,6 +235,18 @@ def reference_data(src, reference, hashes):
 
 
 def check_source(src, run):
+    if src.get("spinor"):
+        if src["nspin"] != 1 or src["icharg"] not in (0, 1, 2):
+            raise ValueError(
+                "Spinor bands require a self-consistent vasp_ncl spin density"
+            )
+        scalar = {**src, "spinor": False, "soc": False}
+        if is_hybrid(src):
+            check_hybrid(scalar)
+        else:
+            check_scalar(scalar)
+        check_convergence(src, run)
+        return
     if is_hybrid(src):
         check_hybrid(src)
         check_convergence(src, run)
@@ -304,15 +321,15 @@ def reconstruct(
         raise ValueError("Model output collides with an input")
     src = metadata(run / "vasprun.xml")
     check_source(src, run)
-    hybrid = is_hybrid(src)
-    if hybrid and potential.resolve() != run.resolve():
+    mode = spectral_mode(src)
+    if mode and potential.resolve() != run.resolve():
         raise ValueError(
-            "Hybrid projection uses the source WAVECAR; omit potential_run"
+            "Spectral projection uses the source WAVECAR; omit potential_run"
         )
     if floor is None:
-        floor = 0.0001 if hybrid else 0.005
+        floor = 0.0001 if mode else 0.005
     xml_hash = file_sha256(run / "vasprun.xml")
-    inputs_for_hash = ("POTCAR", "WAVECAR") if hybrid else ("POTCAR", "CHGCAR")
+    inputs_for_hash = ("POTCAR", "WAVECAR") if mode else ("POTCAR", "CHGCAR")
     hashes = {name: file_sha256(run / name) for name in inputs_for_hash}
     if reference is not None:
         ref, selected = reference_data(src, reference, hashes)
@@ -339,11 +356,11 @@ def reconstruct(
         or np.any(src["eig"][0, :, -1] <= abs_window[1])
     ):
         raise ValueError("Source VASP spectrum must extend above the energy window")
-    if hybrid:
+    if mode:
         ceiling = src["efermi"] + centre_offset + 2 * taper
         if np.any(src["eig"][0, :, -1] < ceiling):
             raise ValueError(
-                "Increase hybrid NBANDS to cover the filter ceiling at every mesh point"
+                "Increase NBANDS to cover the filter ceiling at every mesh point"
             )
         requested_top = (
             abs_window[1]
@@ -351,9 +368,7 @@ def reconstruct(
             else np.max(src["eig"][0, :, band_range[1] - 1])
         )
         if requested_top >= ceiling:
-            raise ValueError(
-                "Hybrid target window extends outside the retained spectrum"
-            )
+            raise ValueError("Target window extends outside the retained spectrum")
     output.parent.mkdir(parents=True, exist_ok=True)
     with (
         TemporaryDirectory(dir=output.parent) as scratch,
@@ -368,9 +383,9 @@ def reconstruct(
             registry,
             d / "direct.h5",
             mesh=mesh,
-            potential_run=None if hybrid else potential,
+            potential_run=None if mode else potential,
             complement=src["efermi"] + centre_offset + 2 * taper + 10.0
-            if hybrid
+            if mode
             else 0.0,
             on_kpoint=on_kpoint,
         )
@@ -387,7 +402,7 @@ def reconstruct(
             width,
             floor,
             taper,
-            spectral_hybrid=hybrid,
+            spectral=bool(mode),
         )
         if on_stage is not None:
             on_stage("Sparsify H(R)")
@@ -395,7 +410,7 @@ def reconstruct(
             d / "filtered.h5",
             candidate,
             cutoff=cutoff,
-            spinless_time_reversal=True,
+            spinless_time_reversal=not src["spinor"],
             band_range=band_range,
             relative_pruning=relative_pruning,
         )
@@ -403,10 +418,10 @@ def reconstruct(
             if (
                 model.attrs["potcar_sha256"] != hashes["POTCAR"]
                 or (
-                    not hybrid
+                    not mode
                     and model.attrs["charge_density_sha256"] != hashes["CHGCAR"]
                 )
-                or (hybrid and file_sha256(run / "WAVECAR") != hashes["WAVECAR"])
+                or (mode and file_sha256(run / "WAVECAR") != hashes["WAVECAR"])
                 or file_sha256(run / "vasprun.xml") != xml_hash
             ):
                 raise ValueError(
@@ -426,8 +441,8 @@ def reconstruct(
                 independent=False,
             )
             report = dict(
-                profile="hybrid-spectral-reconstruction/1"
-                if hybrid
+                profile=f"{mode}-spectral-reconstruction/1"
+                if mode
                 else "scalar-band-reconstruction/1",
                 version=__version__,
                 status="source_mesh_passed"
@@ -462,7 +477,7 @@ def reconstruct(
                 },
                 input_sha256=hashes,
             )
-            if hybrid:
+            if mode:
                 report["spectral_completion"] = {
                     "policy": str(model.attrs["complement_policy"]),
                     "complement_eV": float(model.attrs["complement_eV"]),

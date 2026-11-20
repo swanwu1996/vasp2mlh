@@ -83,6 +83,21 @@ def ao_and_metric(q, atoms, basis, pots, spline, radial_table=None):
     return np.column_stack(aos), np.column_stack(projs), block_diag(*deltas)
 
 
+def spin_rotation(saxis):
+    """SU(2) lift of VASP's Rz(alpha) Ry(beta), from SAXIS to Cartesian spin."""
+    axis = np.asarray(saxis, dtype=float)
+    if axis.shape != (3,) or not np.isfinite(axis).all() or not np.any(axis):
+        raise ValueError("SAXIS must be a finite nonzero three-vector")
+    x, y, z = axis
+    alpha = np.arctan2(y, x) if x or y else 0.0
+    beta = np.arctan2(np.hypot(x, y), z)
+    c, s = np.cos(beta / 2), np.sin(beta / 2)
+    phase = np.exp(-0.5j * alpha)
+    return np.array(
+        [[phase * c, -phase * s], [phase.conjugate() * s, phase.conjugate() * c]]
+    )
+
+
 def adjoint(a):
     return a.conj().swapaxes(-1, -2)
 

@@ -104,8 +104,12 @@ def write_ordinary(out, src, atoms, bounds, r_ao, s_ao, k, s_k, hnew):
         if "fermi_eV" in src.attrs
         else float(src["k/eigenvalues"][0, 0, 0])
     )
+    anchored = hnew.copy()
+    dim = s_k.shape[-1]
+    for start in range(0, hnew.shape[-1], dim):
+        anchored[..., start : start + dim, start : start + dim] -= origin * s_k
     rh, hr, _ = localized_transform(
-        k, src["k/mesh"][:], atoms, np.diff(bounds), hnew - origin * s_k, s_k
+        k, src["k/mesh"][:], atoms, np.diff(bounds), anchored, s_k
     )
     out.attrs["interpolation_reference_eV"] = origin
     translations = np.unique(np.vstack([rh, r_ao]), axis=0)
@@ -113,7 +117,7 @@ def write_ordinary(out, src, atoms, bounds, r_ao, s_ao, k, s_k, hnew):
     out["real/R"] = translations
     hds = out.create_dataset(
         "real/H",
-        shape=(1, len(translations), bounds[-1], bounds[-1]),
+        shape=(1, len(translations), hnew.shape[-1], hnew.shape[-1]),
         dtype="c16",
     )
     sds = out.create_dataset(
@@ -124,7 +128,9 @@ def write_ordinary(out, src, atoms, bounds, r_ao, s_ao, k, s_k, hnew):
     for i, r in enumerate(r_ao):
         row = mapping[tuple(r)]
         sds[row] = s_ao[i]
-        hds[0, row] = hds[0, row] + origin * s_ao[i]
+        for start in range(0, hnew.shape[-1], dim):
+            sl = slice(start, start + dim)
+            hds[0, row, sl, sl] = hds[0, row, sl, sl] + origin * s_ao[i]
     out["k/H"][:] = hnew
     out["k/S"][:] = s_k
 

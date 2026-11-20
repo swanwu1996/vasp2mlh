@@ -5,11 +5,11 @@ import json
 
 import h5py
 import numpy as np
-from scipy.linalg import eigh
+from scipy.linalg import block_diag, eigh
 from scipy.special import expit
 
 from .calibrate import metric_factors, ordinary_geometry, write_ordinary
-from .model import adjoint
+from .model import adjoint, spin_rotation
 from .pipeline import file_sha256, output_file
 from .vasp import is_hybrid
 
@@ -56,7 +56,7 @@ def filtered_operator(
 
 
 def filter_model(
-    model, overlap, output, centre_offset, width, floor, taper, *, spectral_hybrid=False
+    model, overlap, output, centre_offset, width, floor, taper, *, spectral=False
 ):
     if Path(output).resolve() in {Path(p).resolve() for p in (model, overlap)}:
         raise ValueError("Choose a separate output")
@@ -69,17 +69,22 @@ def filter_model(
             src.attrs.get("format") != "vasp2mlh/1"
             or (
                 src.attrs.get("hamiltonian_method", "spectral")
-                != ("spectral" if spectral_hybrid else "direct_scalar_paw")
+                != ("spectral" if spectral else "direct_scalar_paw")
             )
             or ov.attrs.get("format") != "vasp2mlh/overlap/1"
             or src["k/H"].shape[0] != 1
             or "subspace" in src
         ):
             raise ValueError(
-                "Expected a scalar direct PAW model and ordinary AO overlap"
+                "Model method, spin channel count or AO overlap is incompatible with spectral filtering"
             )
-        if spectral_hybrid and not is_hybrid(
-            {"operator_parameters": json.loads(src.attrs["xc_settings"])}
+        spinor = bool(src.attrs.get("spinor", False))
+        if (
+            spectral
+            and not spinor
+            and not is_hybrid(
+                {"operator_parameters": json.loads(src.attrs["xc_settings"])}
+            )
         ):
             raise ValueError("A hybrid spectral model requires hybrid eigenpairs")
         atoms, bounds, r, s_real, k, ordinary = ordinary_geometry(src, ov)
@@ -87,20 +92,22 @@ def filter_model(
         energies = src["k/eigenvalues"][0]
         ceiling = float(energies[:, -1].min())
         centre = float(src.attrs["fermi_eV"] + centre_offset)
-        if spectral_hybrid:
+        if spectral:
             required = centre + 2 * taper
             if ceiling < required:
                 raise ValueError(
-                    f"Hybrid WAVECAR spectrum ends at {ceiling:.4f} eV; "
+                    f"WAVECAR spectrum ends at {ceiling:.4f} eV; "
                     f"increase NBANDS to cover {required:.4f} eV across the source mesh"
                 )
             ceiling = required
         if centre >= ceiling:
             raise ValueError("Filter centre reaches the available VASP band ceiling")
-        nocc = int(np.ceil(src.attrs["nelect"] / 2))
-        edge = slice(max(0, nocc - 2), min(nocc + 2, len(energies[0]), bounds[-1]))
+        nocc = int(np.ceil(src.attrs["nelect"] / (1 if spinor else 2)))
+        edge = slice(
+            max(0, nocc - 2), min(nocc + 2, len(energies[0]), src["k/H"].shape[-1])
+        )
         if (
-            not 1 <= nocc <= min(len(energies[0]), bounds[-1])
+            not 1 <= nocc <= min(len(energies[0]), src["k/H"].shape[-1])
             or edge.stop <= edge.start
         ):
             raise ValueError("AO or VASP spectrum does not cover the occupied edge")
@@ -114,8 +121,14 @@ def filter_model(
             for i, energy in enumerate(energies):
                 _, inverse = metric_factors(src["k/S"][i])
                 root, _ = metric_factors(ordinary[i])
+                if spinor:
+                    inverse, root = block_diag(inverse, inverse), block_diag(root, root)
                 v = inverse @ src["k/projection"][0, i]
-                if spectral_hybrid:
+                if spinor:
+                    v = (spin_rotation(src.attrs["saxis"]) @ v.reshape(2, -1)).reshape(
+                        v.shape
+                    )
+                if spectral:
                     h = spectral_baseline(
                         v, energy, ceiling, taper, src.attrs["complement_eV"]
                     )
@@ -133,8 +146,10 @@ def filter_model(
             out["filter/min_edge_weight"] = coverage
             out["filter/mesh_edge_errors_eV"] = errors
             out.attrs.update(
-                hamiltonian_method="hybrid_spectral_ritz"
-                if spectral_hybrid
+                hamiltonian_method=(
+                    "spinor_spectral_ritz" if spinor else "hybrid_spectral_ritz"
+                )
+                if spectral
                 else "filtered_paw_ritz",
                 metric="ordinary",
                 filter_centre_eV=centre,
@@ -145,7 +160,10 @@ def filter_model(
                 overlap_sha256=file_sha256(overlap),
             )
 
-            if spectral_hybrid:
+            if spinor:
+                out.attrs["source_saxis"] = src.attrs["saxis"]
+                out.attrs["saxis"] = [0.0, 0.0, 1.0]
+            if spectral:
                 out.attrs["complement_policy"] = (
                     "filter_centre_plus_two_tapers_plus_10_eV"
                 )

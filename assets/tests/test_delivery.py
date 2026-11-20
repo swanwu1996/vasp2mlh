@@ -156,6 +156,35 @@ class DeliveryTests(unittest.TestCase):
         with self.assertRaises(FileNotFoundError):
             self.check("deeph")
 
+    def make_complex_spinor(self):
+        rng = np.random.default_rng(73)
+        z = rng.normal(size=(2, 10, 10)) + 1j * rng.normal(size=(2, 10, 10))
+        z[0] = (z[0] + z[0].conj().T) / 2
+        with h5py.File(self.model, "r+") as f:
+            f.attrs.update(spinor=True, saxis=[0.0, 0.0, 1.0])
+            del f["pairs/H"]
+            f["pairs/H"] = z.reshape(1, -1)
+
+    def test_spinor_deeph_preserves_complex_spin_flip_blocks(self):
+        self.make_complex_spinor()
+        deeph(self.model, self.root / "deeph/0", self.lock)
+        self.assertEqual(self.check("deeph")["max_delta_Hk_eV"], 0.0)
+
+    @unittest.skipUnless(
+        importlib.util.find_spec("DFT_interfaces"), "HamGNN dependencies unavailable"
+    )
+    def test_spinor_hamgnn_preserves_and_checks_imaginary_spin_flip(self):
+        self.make_complex_spinor()
+        archive = self.root / "graph_data.npz"
+        hamgnn([self.model], archive, 14, self.lock)
+        self.assertLess(self.check("hamgnn")["max_delta_Hk_eV"], 1e-6)
+        graph = load_graph(archive)
+        self.assertGreater(graph.iHoff.abs().max().item(), 0.0)
+        graph.iHoff.zero_()
+        np.savez_compressed(archive, graph={0: graph})
+        with self.assertRaisesRegex(ValueError, "matrix mismatch"):
+            self.check("hamgnn")
+
     @unittest.skipUnless(
         importlib.util.find_spec("DFT_interfaces"), "HamGNN dependencies unavailable"
     )

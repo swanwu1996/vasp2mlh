@@ -84,6 +84,12 @@ class BatchTests(unittest.TestCase):
 
         job = self.write()[0]
         job.update(mode="validated", reference=self.source, potential_run=self.source)
+        spin_job = {**job, "mode": "noncollinear"}
+        with patch("vasp2mlh.batch.metadata", return_value={"spinor": False}):
+            with self.assertRaisesRegex(
+                ValueError, "disagrees with source mode validated"
+            ):
+                preflight(spin_job)
         (self.source / "CHGCAR").write_text("nonempty")
         with h5py.File(self.source / "vaspout.h5", "w") as f:
             f["results/potential/total"] = [0]

@@ -78,9 +78,7 @@ def sparsify(
         imag_h = imag_s = 0.0
         geometry_overlap = src.attrs.get("metric") == "ordinary"
         if relative_pruning and (
-            not geometry_overlap
-            or src.attrs["spinor"]
-            or "interpolation_reference_eV" not in src.attrs
+            not geometry_overlap or "interpolation_reference_eV" not in src.attrs
         ):
             raise ValueError(
                 "Relative pruning requires an energy-anchored ordinary-metric scalar archive"
@@ -114,7 +112,8 @@ def sparsify(
                 - atoms.positions[i]
                 + np.array([x, y, z]) @ atoms.cell
             )
-            tested = h - origin * s if relative_pruning else h
+            metric = block_diag(s, s) if relative_pruning and src.attrs["spinor"] else s
+            tested = h - origin * metric if relative_pruning else h
             # Apply the same pruning decision to a bond and its Hermitian reverse.
             if key != peer and (
                 (cutoff is not None and np.linalg.norm(dr) > cutoff + 1e-10)
@@ -126,7 +125,7 @@ def sparsify(
                 if geometry_overlap and np.any(s):
                     # Geometry determines S even when the H block is truncated.
                     h = (
-                        np.broadcast_to(origin * s, h.shape)
+                        np.broadcast_to(origin * metric, h.shape)
                         if relative_pruning
                         else np.zeros_like(h)
                     )

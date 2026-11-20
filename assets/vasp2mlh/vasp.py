@@ -49,6 +49,14 @@ def is_hybrid(meta):
     return meta.get("operator_parameters", {}).get("LHFCALC") in {"T", ".TRUE.", "TRUE"}
 
 
+def spectral_mode(meta):
+    if meta.get("spinor"):
+        return "noncollinear"
+    if is_hybrid(meta):
+        return "hybrid"
+    return None
+
+
 def split_mesh(meta, optional):
     """Keep only the integration mesh in the training spectrum and WAVECAR map."""
     weights = meta["weights"]
@@ -61,7 +69,7 @@ def split_mesh(meta, optional):
         or np.any(weights < 0)
         or not np.any(weights > 0)
     ):
-        raise ValueError("Invalid integration weights in hybrid XML")
+        raise ValueError("Invalid integration weights in source XML")
     training = weights > 0
     meta["wave_indices"] = np.flatnonzero(training)
     meta["wave_nk"] = len(training)
@@ -223,7 +231,7 @@ def metadata(path):
         efermi=source_fermi(last),
         eig=eigenvalues(last),
     )
-    if is_hybrid(meta):
+    if spectral_mode(meta):
         split_mesh(meta, last.find("eigenvalues_kpoints_opt"))
     return meta
 

@@ -70,7 +70,8 @@ def deeph_blocks(folder, model, info):
             meta["fermi_energy_eV"], model.attrs["fermi_eV"], atol=1e-10, rtol=0
         )
         and np.isclose(meta["occupation"], model.attrs["nelect"], atol=1e-10, rtol=0)
-        and not meta["spinful"]
+        and meta["spinful"]
+        == bool(model.attrs["spinor"] or model.attrs["spin_channels"] == 2)
         and not meta["orthogonal_basis"],
         "DeepH AO metadata differs",
     )
@@ -191,14 +192,35 @@ def hamgnn_blocks(path, model, info, nao):
     )
     keys = [(0, 0, 0, i, i) for i in range(n)] + indices
     require(len(set(keys)) == len(keys), "Duplicate HamGNN edges")
-    h, s = np.asarray(g.hamiltonian), np.asarray(g.overlap)
-    for a, on, off in ((h, g.Hon, g.Hoff), (s, g.Son, g.Soff)):
+    spinor = bool(model.attrs["spinor"])
+    hd = nao * (2 if spinor else 1)
+    s = np.asarray(g.overlap)
+    if spinor:
+        on = np.asarray(g.Hon) + 1j * np.asarray(g.iHon)
+        off = np.asarray(g.Hoff) + 1j * np.asarray(g.iHoff)
         require(
-            a.shape == (n + ne, nao**2)
-            and np.array_equal(a[:n], on)
-            and np.array_equal(a[n:], off),
-            "Inconsistent HamGNN matrix tensors",
+            on.shape == (n, hd**2)
+            and off.shape == (ne, hd**2)
+            and g.iHon0.shape == g.iHon.shape
+            and g.iHoff0.shape == g.iHoff.shape
+            and not np.any(np.asarray(g.iHon0))
+            and not np.any(np.asarray(g.iHoff0)),
+            "Invalid HamGNN spinor components",
         )
+        h = np.concatenate((on, off))
+    else:
+        h = np.asarray(g.hamiltonian)
+        require(
+            np.array_equal(h[:n], g.Hon) and np.array_equal(h[n:], g.Hoff),
+            "Inconsistent HamGNN Hamiltonian tensors",
+        )
+    require(
+        h.shape == (n + ne, hd**2)
+        and s.shape == (n + ne, nao**2)
+        and np.array_equal(s[:n], g.Son)
+        and np.array_equal(s[n:], g.Soff),
+        "Inconsistent HamGNN matrix tensors",
+    )
     require(
         g.Hon0.shape == g.Hon.shape
         and g.Hoff0.shape == g.Hoff.shape
@@ -207,16 +229,21 @@ def hamgnn_blocks(path, model, info, nao):
         "Invalid HamGNN reference Hamiltonian tensors",
     )
     result = {}
+    spin_slots = [np.r_[a, a + nao] for a in slots] if spinor else slots
     for key, hh, ss in zip(keys, h, s):
         i, j = key[-2:]
         active = np.ix_(slots[i], slots[j])
-        hblock, sblock = hh.reshape(nao, nao)[active], ss.reshape(nao, nao)[active]
+        hblock = hh.reshape(hd, hd)[np.ix_(spin_slots[i], spin_slots[j])]
+        sblock = ss.reshape(nao, nao)[active]
         require(
             np.count_nonzero(hh) == np.count_nonzero(hblock)
             and np.count_nonzero(ss) == np.count_nonzero(sblock),
             "Nonzero padded HamGNN orbitals",
         )
-        result[key] = (hblock.astype(float) * au2ev, sblock)
+        result[key] = (
+            hblock.astype(np.complex128 if spinor else float) * au2ev,
+            sblock,
+        )
     return result
 
 
