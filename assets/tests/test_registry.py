@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,6 +13,7 @@ from ase.io import write
 from scipy.integrate import simpson
 
 from vasp2mlh.atomic import generate
+from vasp2mlh.cli import genbasis_main
 from vasp2mlh.basis import Shell, load_basis
 from vasp2mlh.overlap import overlap, quadrature_blocks
 from vasp2mlh.registry import audit, fingerprint, freeze, read_registry
@@ -63,6 +65,38 @@ class RegistryTests(unittest.TestCase):
                 f["basis/He"].attrs["sha256"] = "changed"
             with self.assertRaisesRegex(ValueError, "checksum"):
                 load_basis(lock, {}, ["He"])
+
+    def test_genbasis_defaults_and_explicit_configuration(self):
+        with (
+            tempfile.TemporaryDirectory() as temp,
+            patch("vasp2mlh.atomic.generate") as generate,
+        ):
+            old = Path.cwd()
+            self.addCleanup(os.chdir, old)
+            os.chdir(temp)
+            cfg = Path("basis.toml")
+            cfg.write_text('command="convert"')
+            genbasis_main([])
+            generate.assert_called_once_with("basis.h5", ["POTCAR"], None)
+            with self.assertRaises(SystemExit):
+                genbasis_main(["basis.toml"])
+            with self.assertRaises(SystemExit):
+                genbasis_main(["missing.toml"])
+            folder = Path("subdir")
+            folder.mkdir()
+            cfg = folder / "basis.toml"
+            calls = []
+            generate.side_effect = lambda *args: calls.append((Path.cwd(), args))
+            cfg.write_text('[parameters]\nlayout="layout.toml"')
+            genbasis_main([str(cfg)])
+            self.assertEqual(
+                calls, [(folder.resolve(), ("basis.h5", ["POTCAR"], "layout.toml"))]
+            )
+            cfg.write_text('[parameters]\noutput="basis.toml"')
+            with self.assertRaises(SystemExit):
+                genbasis_main([str(cfg)])
+            self.assertEqual(generate.call_count, 2)
+            self.assertEqual(Path.cwd(), Path(temp))
 
     def test_matched_paw_libraries_and_polarization(self):
         r = np.linspace(0.001, 4, 81)

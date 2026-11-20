@@ -83,6 +83,8 @@ def generate(output, potcars, layout_file=None):
                     f"Multiple PAW references for {sym}; choose one per library"
                 )
             pots[sym] = pot
+    if not pots:
+        raise ValueError("No PAW element datasets in the supplied POTCAR files")
     layout = load_config(layout_file) if layout_file else None
     if layout is not None and (not layout or not set(layout) <= set(pots)):
         raise ValueError("Supply a PAW reference for every element in the layout")

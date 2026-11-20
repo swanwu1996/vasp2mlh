@@ -424,6 +424,36 @@ def make_parser():
     return parser, subs.choices
 
 
+def genbasis_main(argv=None):
+    from . import __version__
+
+    parser = argparse.ArgumentParser(
+        prog="vasp2mlh_genbasis",
+        description="Generate a frozen AO basis from VASP PAW POTCAR files.",
+        epilog="With no argument: read ./POTCAR and write ./basis.h5 using all native "
+        "pseudo partial waves (paw-native-v1). Pass basis.toml explicitly to use "
+        "its settings; paths resolve from that file. An optional layout selects "
+        "compact orbitals (paw-compact-v1). A successful run replaces its output file.",
+    )
+    parser.add_argument(
+        "--version", action="version", version=f"%(prog)s {__version__}"
+    )
+    parser.add_argument(
+        "config",
+        metavar="basis.toml",
+        nargs="?",
+        help="optional basis-generation control file",
+    )
+    config = parser.parse_args(argv).config
+    if config is None:
+        return run_cli(
+            ["basis-generate", "basis.h5", "--potcar", "POTCAR"], parser.prog
+        )
+    if Path(config).suffix.lower() not in (".json", ".toml"):
+        parser.error("Supply a TOML or JSON basis configuration")
+    return run_cli([config], parser.prog)
+
+
 def valid_main(argv=None):
     from . import __version__
 
@@ -442,6 +472,10 @@ def valid_main(argv=None):
 
 
 def main(argv=None, *, validation_only=False):
+    return run_cli(argv, "vasp2mlh_valid" if validation_only else "vasp2mlh")
+
+
+def run_cli(argv, program):
     from contextlib import ExitStack
     from threadpoolctl import threadpool_limits
     from .configuration import (
@@ -459,8 +493,21 @@ def main(argv=None, *, validation_only=False):
             if len(argv) == 1 and Path(argv[0]).suffix.lower() in (".json", ".toml"):
                 path = Path(argv[0]).resolve()
                 config = load_config(path)
-                command = config.get("command", "convert-batch")
-                if validation_only and command != "convert":
+                if program == "vasp2mlh_genbasis":
+                    command = config.get("command", "basis-generate")
+                    if command != "basis-generate":
+                        raise ValueError("Expected a basis-generate configuration")
+                    params = config.get("parameters", {})
+                    if not isinstance(params, dict):
+                        raise ValueError("parameters must be a table")
+                    config["parameters"] = {
+                        "output": "basis.h5",
+                        "potcar": ["POTCAR"],
+                        **params,
+                    }
+                else:
+                    command = config.get("command", "convert-batch")
+                if program == "vasp2mlh_valid" and command != "convert":
                     raise ValueError(
                         "Expected a single-structure convert configuration"
                     )
@@ -503,10 +550,17 @@ def main(argv=None, *, validation_only=False):
                 if threads < 1:
                     raise ValueError("threads must be a positive integer")
                 stack.enter_context(threadpool_limits(limits=threads))
-            if validation_only:
+            if program == "vasp2mlh_valid":
                 from .validation import validate_sample
 
                 return validate_sample(args, path)
+            if program == "vasp2mlh_genbasis":
+                if "threads" not in settings:
+                    stack.enter_context(threadpool_limits(limits=1))
+                execute(parser, args)
+                method = "paw-compact-v1" if args.layout else "paw-native-v1"
+                print(f"AO basis ({method}): {Path(args.output).resolve()}")
+                return
             return execute(parser, args)
     except (
         ValueError,
@@ -517,7 +571,6 @@ def main(argv=None, *, validation_only=False):
         ImportError,
         np.linalg.LinAlgError,
     ) as exc:
-        program = "vasp2mlh_valid" if validation_only else parser.prog
         parser.exit(2, f"{program}: {exc}\n")
 
 
