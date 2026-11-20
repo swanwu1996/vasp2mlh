@@ -20,6 +20,10 @@ class SingleConversionTests(unittest.TestCase):
             try:
                 os.chdir(folder)
                 Path("WAVECAR").touch()
+                with patch("vasp2mlh.validation.validate_sample") as validate:
+                    valid_main([])
+                    self.assertEqual(validate.call_args.args[0].run, ".")
+                    self.assertIsNone(validate.call_args.args[1])
                 with patch("vasp2mlh.cli.execute") as execute:
                     main([])
                     self.assertEqual(execute.call_args.args[1].run, ".")

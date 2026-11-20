@@ -42,7 +42,7 @@ def make_parser():
         prog="v2h_valid",
         help="score a saved model against independent VASP bands",
     )
-    valid.add_argument("config", nargs="?", default="mlh.toml", metavar="mlh.toml")
+    valid.add_argument("config", nargs="?", metavar="mlh.toml")
     for sub in (genbasis, valid):
         sub.add_argument(
             "--version", action="version", version=f"%(prog)s {__version__}"
@@ -193,7 +193,7 @@ def make_parser():
             "--completion-method",
             choices=("spectral-ritz", "locality-constrained"),
             default=None,
-            help="completion of the scalar hybrid Hamiltonian (default: spectral-ritz)",
+            help="completion of the scalar hybrid Hamiltonian (default: locality-constrained)",
         )
         operation.add_argument(
             "--centre-offset",
@@ -490,11 +490,14 @@ def main(argv=None, *, validation_only=False):
         else:
             argv = ["--help"]
     program = "v2h"
+    path = None
     if argv[0] in ("genbasis", "valid"):
         entry_parser = commands[argv[0]]
         entry = entry_parser.parse_args(argv[1:])
         program = entry_parser.prog
-        if entry.config is None:
+        if entry.config is None and program == "v2h_valid":
+            argv = ["mlh.toml"] if Path("mlh.toml").is_file() else ["convert", "."]
+        elif entry.config is None:
             argv = ["basis-generate", "basis.h5", "--potcar", "POTCAR"]
         elif Path(entry.config).suffix.lower() in (".json", ".toml"):
             argv = [entry.config]

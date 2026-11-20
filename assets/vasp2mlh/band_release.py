@@ -313,13 +313,13 @@ def reconstruct(
         )
     if completion_method not in (None, "spectral-ritz", "locality-constrained"):
         raise ValueError(f"Unknown hybrid method {completion_method}")
-    localized = completion_method == "locality-constrained"
+    localized = hybrid and completion_method != "spectral-ritz"
     if completion_method is not None and not hybrid:
         raise ValueError("Choosing a completion method requires a scalar hybrid source")
     if localized and (
         floor is not None or (centre_offset, width, taper) != (6.0, 1.0, 2.0)
     ):
-        raise ValueError("Ritz filter controls do not apply to localized completion")
+        raise ValueError("Set completion_method='spectral-ritz' to use Ritz filter controls")
     if floor is None:
         floor = 0.0001 if hybrid else 0.005
     xml_hash = file_sha256(run / "vasprun.xml")
