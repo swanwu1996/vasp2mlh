@@ -10,6 +10,7 @@ import h5py
 import numpy as np
 from ase.io import read
 from ase.neighborlist import neighbor_list
+from scipy.integrate import simpson
 from scipy.interpolate import CubicSpline
 from scipy.special import lpmv, roots_legendre
 
@@ -55,20 +56,28 @@ def quadrature_blocks(atoms, basis, order):
         sh = basis[symbol][idx]
         return np.nan_to_num(radial[symbol][idx](np.maximum(r, sh.radius[0])))
 
+    def onsite(a, b, i, j, symbol):
+        if a.l != b.l:
+            return np.zeros((2 * a.l + 1, 2 * b.l + 1))
+        # Use the radial quadrature that defines the normalization of each shell.
+        # A single Gauss panel can miss narrow features in PAW-derived radial functions.
+        if np.array_equal(a.radius, b.radius):
+            val = simpson((a.radius * a.radial) * (a.radius * b.radial), x=a.radius)
+        else:
+            grid = np.union1d(a.radius, b.radius)
+            grid = grid[grid <= min(a.radius[-1], b.radius[-1])]
+            val = simpson(
+                grid**2 * integrate(symbol, i, grid) * integrate(symbol, j, grid),
+                x=grid,
+            )
+        return np.eye(2 * a.l + 1) * val
+
     @lru_cache(maxsize=1024)
     def axial_blocks(left, right, d):
         shells_a, shells_b = basis[left], basis[right]
         if d == 0:
-            r = (nodes + 1) * min(cut[left], cut[right]) / 2
-            w = weights * r * r * min(cut[left], cut[right]) / 2
             return [
-                [
-                    np.eye(2 * a.l + 1)
-                    * np.dot(w * integrate(left, i, r), integrate(right, j, r))
-                    if a.l == b.l
-                    else np.zeros((2 * a.l + 1, 2 * b.l + 1))
-                    for j, b in enumerate(shells_b)
-                ]
+                [onsite(a, b, i, j, left) for j, b in enumerate(shells_b)]
                 for i, a in enumerate(shells_a)
             ]
         # Piecewise integration avoids derivative kinks at r=d and r+d=cut[right].
@@ -168,15 +177,23 @@ def quadrature_blocks(atoms, basis, order):
             yield peer, mat.T
 
 
-def overlap(structure_file, config, output, potcar=None, order=48):
+def overlap(structure_file, config, output, potcar=None, order=None):
     if Path(output).resolve() in {
         Path(path).resolve()
         for path in (structure_file, config, potcar)
         if path is not None
     }:
         raise ValueError("Choose a separate overlap output")
+    if order is None:
+        order = 48
+        if h5py.is_hdf5(config):
+            with h5py.File(config) as registry:
+                if registry.attrs.get("method") in {"paw-native-v1", "paw-compact-v1"}:
+                    order = 96
     atoms = read(structure_file)
-    basis = load_basis(config, read_potcar(potcar) if potcar else {})
+    basis = load_basis(
+        config, read_potcar(potcar) if potcar else {}, atoms.get_chemical_symbols()
+    )
     if set(basis) != set(atoms.get_chemical_symbols()):
         raise ValueError("Species and basis differ")
     ls = {s: [a.l for a in shells] for s, shells in basis.items()}
@@ -184,6 +201,8 @@ def overlap(structure_file, config, output, potcar=None, order=48):
         f.attrs.update(
             format="vasp2mlh/overlap/1",
             metric="ordinary",
+            angular_convention="real tesseral m=-l..l, Wikipedia",
+            length_unit="angstrom",
             shells=json.dumps(ls),
             order=order,
         )

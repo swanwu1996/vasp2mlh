@@ -8,7 +8,7 @@ import numpy as np
 from .comparison import compare_path, write_comparison
 from .analysis import held_out, locality, lobster_summary, spectra
 from .sparse import sparsify
-from .export import deeph, hamgnn
+from .export import deeph, deeph_batch, hamgnn
 from .pipeline import bands, build, validate, output_file
 
 
@@ -17,11 +17,40 @@ def main():
         prog="vasp2mlh", description="VASP WAVECAR to PAW-metric AO Hamiltonians"
     )
     subs = parser.add_subparsers(dest="command", required=True)
+    gen = subs.add_parser(
+        "basis-generate",
+        help="generate a raw PAW reference or a compact multi-zeta AO registry",
+    )
+    gen.add_argument("output")
+    gen.add_argument("--potcar", nargs="+", required=True)
+    gen.add_argument(
+        "--layout",
+        help="JSON element cutoffs in angstrom and shell multiplicities; omit for the raw PAW baseline",
+    )
+    freeze = subs.add_parser(
+        "basis-freeze",
+        help="freeze normalized radial functions and shell order for a model family",
+    )
+    freeze.add_argument("config")
+    freeze.add_argument("output")
+    freeze.add_argument("--potcar")
+    audit = subs.add_parser(
+        "basis-check",
+        help="check AO identity and matrix dimensions against a frozen registry",
+    )
+    audit.add_argument("registry")
+    audit.add_argument("models", nargs="+")
+    batch = subs.add_parser(
+        "deeph-batch", help="export a checked cohort of DeepH samples"
+    )
+    batch.add_argument("models", nargs="+")
+    batch.add_argument("-o", "--output", required=True)
+    batch.add_argument("--basis-lock", required=True)
     make = subs.add_parser(
         "build", help="project WAVECAR using the matching POTCAR and vasprun.xml"
     )
     make.add_argument("run")
-    make.add_argument("basis", help="JSON shell configuration")
+    make.add_argument("basis", help="shell configuration JSON or frozen basis registry")
     make.add_argument("output")
     make.add_argument("--mesh", type=int, nargs=3)
     make.add_argument(
@@ -62,7 +91,11 @@ def main():
     ov.add_argument(
         "--potcar", help="only for basis specifications using POTCAR radial shells"
     )
-    ov.add_argument("--order", type=int, default=48)
+    ov.add_argument(
+        "--order",
+        type=int,
+        help="two-centre quadrature order (96 for generated PAW libraries, otherwise 48)",
+    )
     sparse = subs.add_parser(
         "sparsify", help="write a validated Hermitian block-sparse H/S pair archive"
     )
@@ -133,8 +166,10 @@ def main():
     dh = subs.add_parser("deeph", help="export one DeepH-pack 1.x sample")
     dh.add_argument("model")
     dh.add_argument("destination")
+    dh.add_argument("--basis-lock")
     ham = subs.add_parser("hamgnn", help="export a HamGNN OpenMX graph archive")
     ham.add_argument("models", nargs="+")
+    ham.add_argument("--basis-lock")
     ham.add_argument("-o", "--output", required=True)
     ham.add_argument("--nao-max", type=int, choices=(14, 19, 26), default=14)
     subspace = subs.add_parser(
@@ -169,7 +204,21 @@ def main():
     view.add_argument("-o", "--output", required=True)
     args = parser.parse_args()
     try:
-        if args.command == "calibrate":
+        if args.command == "basis-generate":
+            from .atomic import generate
+
+            generate(args.output, args.potcar, args.layout)
+        elif args.command == "basis-freeze":
+            from .registry import freeze
+
+            freeze(args.config, args.output, args.potcar)
+        elif args.command == "basis-check":
+            from .registry import audit
+
+            print(json.dumps(audit(args.models, args.registry), indent=2))
+        elif args.command == "deeph-batch":
+            deeph_batch(args.models, args.output, args.basis_lock)
+        elif args.command == "calibrate":
             from .calibrate import calibrate
 
             calibrate(
@@ -235,9 +284,9 @@ def main():
                 report["held_out"] = held_out(args.model, args.reference_xml)
             print(json.dumps(report, indent=2))
         elif args.command == "deeph":
-            deeph(args.model, args.destination)
+            deeph(args.model, args.destination, args.basis_lock)
         elif args.command == "hamgnn":
-            hamgnn(args.models, args.output, args.nao_max)
+            hamgnn(args.models, args.output, args.nao_max, args.basis_lock)
         elif args.command == "bands":
             k = np.loadtxt(args.points, ndmin=2)
             if k.shape[1] != 3 or not np.isfinite(k).all():

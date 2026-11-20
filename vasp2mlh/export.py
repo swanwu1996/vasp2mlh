@@ -10,6 +10,7 @@ from ase.io import write
 from scipy.linalg import block_diag
 
 from .pipeline import output_file
+from .registry import audit
 from .realspace import structure, orbital_bounds, pair_blocks
 
 
@@ -27,7 +28,12 @@ def real_matrix(x, tol, name):
     return x.real
 
 
-def deeph(model, destination):
+def deeph(model, destination, registry=None):
+    basis_info = audit([model], registry, labels=True)[0]
+    _write_deeph(model, destination, basis_info)
+
+
+def _write_deeph(model, destination, basis_info):
     dest = Path(destination)
     dest.parent.mkdir(parents=True, exist_ok=True)
     if dest.exists() and (not dest.is_dir() or any(dest.iterdir())):
@@ -51,6 +57,7 @@ def deeph(model, destination):
                 out["chunk_boundaries"] = np.r_[0, np.cumsum([x.size for x in data])]
                 out["entries"] = np.concatenate([x.ravel() for x in data])
         info = dict(
+            ao_sha256_by_element=basis_info["sha256_by_element"],
             atoms_quantity=len(atoms),
             orbits_quantity=int(orbital_bounds(f)[-1]),
             spinful=spinful,
@@ -62,6 +69,21 @@ def deeph(model, destination):
         (tmp / "info.json").write_text(json.dumps(info, indent=2) + "\n")
         write(tmp / "POSCAR", atoms, format="vasp", direct=False, vasp5=True)
         tmp.rename(dest)
+
+
+def deeph_batch(models, destination, registry):
+    """Export a checked cohort as numbered DeepH samples, atomically."""
+    dest = Path(destination)
+    reports = audit(models, registry, labels=True)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.exists() and (not dest.is_dir() or any(dest.iterdir())):
+        raise ValueError("Choose a new or empty dataset directory")
+    with TemporaryDirectory(dir=dest.parent) as staging:
+        dataset = Path(staging) / "dataset"
+        dataset.mkdir()
+        for i, (model, info) in enumerate(zip(models, reports)):
+            _write_deeph(model, dataset / str(i), info)
+        dataset.rename(dest)
 
 
 # Source index for each OpenMX real harmonic when reading Wikipedia m=-l..l.
@@ -184,30 +206,14 @@ def ham_graph(f, nao):
     return graph
 
 
-def hamgnn(models, output, nao=14):
+def hamgnn(models, output, nao=14, registry=None):
+    reports = audit(models, registry, labels=True)
     graphs = {}
-    basis_by_element = {}
-    spin_modes = set()
-    for i, path in enumerate(models):
+    for i, (path, info) in enumerate(zip(models, reports)):
         with h5py.File(path) as f:
-            spin_modes.add(
-                (f.attrs["spinor"], f.attrs["soc"], f.attrs["spin_channels"])
-            )
-            if len(spin_modes) != 1:
-                raise ValueError("Each HamGNN archive must use a common spin mode")
-            for symbol, shells in json.loads(f.attrs["shells"]).items():
-                definition = tuple(
-                    (
-                        l,
-                        f[f"basis/{symbol}/{n}/r"][:].tobytes(),
-                        f[f"basis/{symbol}/{n}/R"][:].tobytes(),
-                    )
-                    for n, l in enumerate(shells)
-                )
-                if basis_by_element.setdefault(symbol, definition) != definition:
-                    raise ValueError(
-                        f"Inconsistent radial basis for {symbol} in {path}"
-                    )
             graphs[i] = ham_graph(f, nao)
+            graphs[i].ao_sha256_by_element = json.dumps(
+                info["sha256_by_element"], sort_keys=True
+            )
     with output_file(output) as tmp, tmp.open("wb") as stream:
         np.savez_compressed(stream, graph=graphs)

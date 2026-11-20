@@ -67,8 +67,8 @@ def build(run, config, output, mesh=None, complement=0.0, potential_run=None):
     points = np.empty_like(k)
     mesh_indices(k, mesh)
     potentials = read_potcar(run / "POTCAR")
-    basis = load_basis(config, potentials)
     symbols = atoms.get_chemical_symbols()
+    basis = load_basis(config, potentials, symbols)
     if set(symbols) != set(basis) or set(symbols) != set(potentials):
         raise ValueError("POTCAR, basis and XML species must agree")
     if any(
@@ -199,8 +199,23 @@ def build(run, config, output, mesh=None, complement=0.0, potential_run=None):
             encut_eV=w.encut,
             complement_eV=complement,
             shells=json.dumps(ls),
-            basis_config=Path(config).read_text(),
+            basis_config=(
+                json.dumps({"registry_sha256": file_sha256(config)})
+                if h5py.is_hdf5(config)
+                else Path(config).read_text()
+            ),
             potcar_sha256=file_sha256(run / "POTCAR"),
+            paw_sha256_by_element=json.dumps(
+                {s: potentials[s].sha256 for s in set(symbols)}, sort_keys=True
+            ),
+            xc_settings=json.dumps(
+                {
+                    key: val
+                    for key, val in meta["operator_parameters"].items()
+                    if key in {"GGA", "METAGGA", "LHFCALC", "LDAU", "XC"}
+                },
+                sort_keys=True,
+            ),
         )
         if (run / "CHGCAR").is_file() and (run / "CHGCAR").stat().st_size:
             f.attrs["charge_density_sha256"] = file_sha256(run / "CHGCAR")

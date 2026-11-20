@@ -1,11 +1,13 @@
 """Numerical radial shells and reciprocal-space PAW data, in angstrom units."""
 
-from dataclasses import dataclass
+from dataclasses import InitVar, dataclass
 from pathlib import Path
+import hashlib
 import json
 import os
 import re
 
+import h5py
 import numpy as np
 from scipy.integrate import simpson
 from scipy.interpolate import CubicSpline
@@ -33,19 +35,30 @@ class Shell:
     radial: np.ndarray
     label: str
 
-    def __post_init__(self):
+    normalized: InitVar[bool] = False
+
+    def __post_init__(self, normalized):
         if (
-            self.l < 0
+            not isinstance(self.l, (int, np.integer))
+            or self.l < 0
+            or self.radius.ndim != 1
+            or self.radius.shape != self.radial.shape
+            or not np.isfinite(self.radius).all()
             or self.radius.size < 3
             or self.radius[0] < 0
             or not np.all(np.diff(self.radius) > 0)
             or not np.isfinite(self.radial).all()
         ):
             raise ValueError(f"Invalid radial mesh or shell: {self.label}")
+        self.l = int(self.l)
         norm = simpson((self.radius * self.radial) ** 2, x=self.radius)
         if not np.isfinite(norm) or norm <= 0:
             raise ValueError(f"Invalid radial norm: {self.label}")
-        self.radial = self.radial / np.sqrt(norm)
+        if normalized:
+            if not np.isclose(norm, 1.0, rtol=1e-10, atol=1e-12):
+                raise ValueError(f"Invalid stored radial normalization: {self.label}")
+        else:
+            self.radial = self.radial / np.sqrt(norm)
 
     def transform(self, q):
         # Integrate once per distinct radius. Bound the temporary Bessel table.
@@ -79,6 +92,7 @@ class Potential:
     grid: np.ndarray
     waves: list
     title: str
+    sha256: str = ""
 
     def projector(self, i, q, spline):
         a = self.projectors[i]
@@ -136,13 +150,25 @@ def read_potcar(path):
         ):
             raise ValueError(f"Inconsistent PAW radial records for {element}")
         potentials[element] = Potential(
-            element, ls, tables, qmax, delta, grid, waves, lines[0]
+            element,
+            ls,
+            tables,
+            qmax,
+            delta,
+            grid,
+            waves,
+            lines[0],
+            hashlib.sha256(block.strip().encode()).hexdigest(),
         )
     return potentials
 
 
-def load_basis(config, potentials):
+def load_basis(config, potentials, elements=None):
     path = Path(config)
+    if h5py.is_hdf5(path):
+        from .registry import read_registry
+
+        return read_registry(path, elements, potentials)
     specs = json.loads(path.read_text())
     basis = {}
     for symbol, shells in specs.items():
