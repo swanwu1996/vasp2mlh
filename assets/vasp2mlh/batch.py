@@ -5,6 +5,7 @@ import json
 import multiprocessing
 import re
 import sys
+from collections import Counter
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from functools import lru_cache
 from pathlib import Path
@@ -20,8 +21,23 @@ from .basis import radial_backend
 from .configuration import backend_setting, load_config, runtime_controls
 from .pipeline import build, file_sha256, output_file
 from .realspace import SPARSE_FORMAT
+from .progress import progress_bar
 from .registry import FORMAT as REGISTRY_FORMAT
 from .sparse import sparsify
+
+
+# Each spawned worker shares this one counter with the rendering parent.
+_projected_points = None
+
+
+def init_worker(projected):
+    global _projected_points
+    _projected_points = projected
+
+
+def count_projected_point(done, total):
+    with _projected_points.get_lock():
+        _projected_points.value += 1
 
 
 def read_jobs(manifest, config=None):
@@ -218,6 +234,9 @@ def convert(job, output, threads, backend=None):
                         "status": "skipped",
                         "seconds": monotonic() - started,
                     }
+            point_callback = (
+                count_projected_point if _projected_points is not None else None
+            )
             with output_file(target) as tmp:
                 if mode == "validated":
                     report = reconstruct(
@@ -226,6 +245,7 @@ def convert(job, output, threads, backend=None):
                         job["reference"],
                         tmp,
                         potential_run=job["potential_run"],
+                        on_kpoint=point_callback,
                         **job["options"],
                     )
                     metrics = {
@@ -237,7 +257,13 @@ def convert(job, output, threads, backend=None):
                     cutoff = options.pop("cutoff", None)
                     with TemporaryDirectory(dir=output) as d:
                         dense = Path(d) / "projection.h5"
-                        build(job["run"], job["registry"], dense, **options)
+                        build(
+                            job["run"],
+                            job["registry"],
+                            dense,
+                            on_kpoint=point_callback,
+                            **options,
+                        )
                         sparsify(dense, tmp, cutoff=cutoff)
                     metrics = {}
                 with h5py.File(tmp, "r+") as f:
@@ -309,18 +335,35 @@ def run_batch(manifest, output=None, workers=None, threads=None, check_only=None
     }
     if any(p.is_symlink() or p.resolve() in protected for p in destinations):
         raise ValueError("A batch destination is a symlink or collides with an input")
-    with (state / "lock").open("a") as lock:
+    context = multiprocessing.get_context("spawn")
+    enabled = settings.get("progress", True)
+    projected = context.Value("Q", 0) if enabled and not check_only else None
+    label = (
+        "Preflight" if check_only else f"Convert ({min(workers, len(jobs))} workers)"
+    )
+    with (
+        (state / "lock").open("a") as lock,
+        progress_bar(label, len(jobs), "job", enabled, projected=projected) as bar,
+    ):
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         results = {}
         write_json(summary_file, {"status": "running", "total": len(jobs)})
 
+        counts = Counter()
+
         def record(result):
             results[result["id"]] = result
-            print(
-                f"[{len(results)}/{len(jobs)}] {result['id']} {result['status']} {result.get('error', '')}",
-                file=sys.stderr,
-                flush=True,
-            )
+            status = result["status"]
+            counts[status] += 1
+            if status == "failed":
+                message = f"{result['id']} failed: {result['error']}"
+                if sys.stderr.isatty() and enabled:
+                    bar.write(message, file=sys.stderr)
+                else:
+                    print(message, file=sys.stderr, flush=True)
+            detail = ", ".join(f"{name}={n}" for name, n in counts.items())
+            bar.set_postfix_str(f"{detail}, last={result['id']}", refresh=False)
+            bar.update(1)
 
         if check_only:
             for job in jobs:
@@ -333,7 +376,9 @@ def run_batch(manifest, output=None, workers=None, threads=None, check_only=None
         else:
             pool = ProcessPoolExecutor(
                 max_workers=min(workers, len(jobs)),
-                mp_context=multiprocessing.get_context("spawn"),
+                mp_context=context,
+                initializer=init_worker,
+                initargs=(projected,),
             )
             try:
                 futures = {

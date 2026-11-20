@@ -7,6 +7,7 @@ from tempfile import TemporaryDirectory
 from .atomic import generate
 from .band_release import reconstruct
 from .export import deeph, hamgnn
+from .progress import ConversionProgress, progress_bar
 
 
 def require_file(path, hint):
@@ -54,7 +55,12 @@ def convert_sample(args):
         require_file(registry, "Supply a frozen AO registry with --registry.")
 
     output.parent.mkdir(parents=True, exist_ok=True)
-    with TemporaryDirectory(dir=output.parent) as staging:
+    # AO preparation, seven reconstruction stages and the final sample export.
+    with (
+        TemporaryDirectory(dir=output.parent) as staging,
+        progress_bar("Prepare AO basis", 9, "stage", args.progress) as bar,
+    ):
+        progress = ConversionProgress(bar)
         result = Path(staging) / "result"
         result.mkdir()
         if native:
@@ -76,7 +82,10 @@ def convert_sample(args):
             cutoff=args.cutoff,
             max_rmse=args.max_rmse,
             max_error=args.max_error,
+            on_stage=progress.stage,
+            on_kpoint=progress.projected,
         )
+        progress.stage(f"Export {args.format}")
         if args.format == "deeph":
             sample = Path("deeph/0")
             deeph(model, result / sample, registry)
@@ -87,6 +96,7 @@ def convert_sample(args):
             json.dumps(report, indent=2, allow_nan=False) + "\n"
         )
         result.rename(output)
+        bar.update(1)
     print(f"{args.format} sample: {(output / sample).absolute()}")
     print(
         f"Independent band error: RMS {1000 * report['rmse_eV']:.3f} meV, maximum {1000 * report['max_error_eV']:.3f} meV"

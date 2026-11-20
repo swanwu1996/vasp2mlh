@@ -46,7 +46,16 @@ def file_sha256(path):
     return digest.hexdigest()
 
 
-def build(run, config, output, mesh=None, complement=0.0, potential_run=None):
+def build(
+    run,
+    config,
+    output,
+    mesh=None,
+    complement=0.0,
+    potential_run=None,
+    *,
+    on_kpoint=None,
+):
     if not np.isfinite(complement):
         raise ValueError("Complement energy must be finite")
     run = Path(run)
@@ -161,6 +170,8 @@ def build(run, config, output, mesh=None, complement=0.0, potential_run=None):
                     rayleigh_error.append(
                         float(np.abs((ce.conj() * residual).sum(axis=0)).max())
                     )
+            if on_kpoint is not None:
+                on_kpoint(ik + 1, len(k))
         if operator is not None:
             f["k/operator_edge_rayleigh_error_eV"] = rayleigh_error
             f["k/operator_edge_residual_norm_eV"] = residual_norm

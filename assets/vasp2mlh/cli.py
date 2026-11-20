@@ -460,6 +460,8 @@ def main(argv=None):
                         )
             else:
                 args = parser.parse_args(argv)
+            if args.command == "convert":
+                args.progress = settings.get("progress", True)
             if args.command == "convert" and "threads" not in settings:
                 stack.enter_context(threadpool_limits(limits=1))
             return execute(parser, args)

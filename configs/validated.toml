@@ -4,6 +4,7 @@ registry = "basis.h5"
 output = "models"
 
 [runtime]
+progress = true
 workers = 2
 threads = 1
 backend = "cython"

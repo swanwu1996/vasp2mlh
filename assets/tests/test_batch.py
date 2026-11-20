@@ -1,3 +1,5 @@
+from contextlib import redirect_stderr
+from io import StringIO
 import json
 import os
 import tempfile
@@ -43,7 +45,20 @@ class BatchTests(unittest.TestCase):
     def test_preflight_and_names(self):
         self.config["jobs"].append({"id": "b", "run": "absent"})
         self.write()
-        summary = run_batch(self.manifest, self.out, check_only=True)
+        log = StringIO()
+        with redirect_stderr(log):
+            summary = run_batch(self.manifest, self.out, check_only=True)
+        self.assertIn("2/2", log.getvalue())
+        self.assertIn("ready=1", log.getvalue())
+        self.assertIn("failed=1", log.getvalue())
+        self.assertNotIn("\r", log.getvalue())
+        self.config["runtime"] = {"progress": False}
+        self.write()
+        quiet = StringIO()
+        with redirect_stderr(quiet):
+            run_batch(self.manifest, self.out, check_only=True)
+        self.assertNotIn("2/2", quiet.getvalue())
+        self.assertIn("b failed", quiet.getvalue())
         self.assertEqual([r["status"] for r in summary["jobs"]], ["ready", "failed"])
         self.assertFalse((self.out / "summary.json").exists())
         for name in ("a", "../not-a-job"):

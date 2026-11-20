@@ -28,6 +28,8 @@ def load_config(path):
 def runtime_controls(config, batch):
     settings = config.get("runtime", {})
     allowed = {"threads", "backend"}
+    if batch or config.get("command") == "convert":
+        allowed.add("progress")
     if batch:
         allowed.update(("workers", "check_only"))
     if not isinstance(settings, dict) or settings.keys() - allowed:
@@ -35,8 +37,9 @@ def runtime_controls(config, batch):
     for name in ("threads", "workers"):
         if name in settings and (type(settings[name]) is not int or settings[name] < 1):
             raise ValueError(f"runtime.{name} must be a positive integer")
-    if "check_only" in settings and type(settings["check_only"]) is not bool:
-        raise ValueError("runtime.check_only must be true or false")
+    for key in ("check_only", "progress"):
+        if key in settings and type(settings[key]) is not bool:
+            raise ValueError(f"runtime.{key} must be true or false")
     if settings.get("backend", "auto") not in ("auto", "cython", "scipy"):
         raise ValueError("runtime.backend must be auto, cython or scipy")
     return settings

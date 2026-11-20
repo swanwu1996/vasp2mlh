@@ -91,6 +91,10 @@ class ConfigurationTests(unittest.TestCase):
                 operation_args(
                     "reconstruct-bands", parsers["reconstruct-bands"], base | options
                 )
+        with self.assertRaisesRegex(ValueError, "progress must be true or false"):
+            runtime_controls(
+                {"command": "convert", "runtime": {"progress": "false"}}, False
+            )
         with self.assertRaisesRegex(ValueError, "positive integer"):
             runtime_controls({"runtime": {"threads": True}}, True)
         with self.assertRaisesRegex(ValueError, "Allowed runtime"):

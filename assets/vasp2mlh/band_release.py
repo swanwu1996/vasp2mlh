@@ -163,7 +163,11 @@ def reconstruct(
     width=1.0,
     floor=0.005,
     taper=2.0,
+    on_stage=None,
+    on_kpoint=None,
 ):
+    if on_stage is not None:
+        on_stage("Check VASP inputs")
     if (band_range is None) == (energy_window is None):
         raise ValueError("Choose either an ordered band range or an energy window")
     if energy_window is not None and (
@@ -257,8 +261,21 @@ def reconstruct(
     ):
         d = Path(scratch)
         write(d / "geometry.vasp", a, format="vasp", direct=True)
-        build(run, registry, d / "direct.h5", mesh=mesh, potential_run=potential)
+        if on_stage is not None:
+            on_stage("Project WAVECAR")
+        build(
+            run,
+            registry,
+            d / "direct.h5",
+            mesh=mesh,
+            potential_run=potential,
+            on_kpoint=on_kpoint,
+        )
+        if on_stage is not None:
+            on_stage("Compute AO overlap")
         overlap(d / "geometry.vasp", registry, d / "overlap.h5", order=96)
+        if on_stage is not None:
+            on_stage("Filter Hamiltonian")
         filter_model(
             d / "direct.h5",
             d / "overlap.h5",
@@ -268,6 +285,8 @@ def reconstruct(
             floor,
             taper,
         )
+        if on_stage is not None:
+            on_stage("Sparsify H(R)")
         sparsify(
             d / "filtered.h5",
             candidate,
@@ -283,6 +302,8 @@ def reconstruct(
             ):
                 raise ValueError("Source PAW or density changed during reconstruction")
             basis = inspect_basis(model, expected)
+            if on_stage is not None:
+                on_stage("Validate off-grid bands")
             independent, observations = score_window(
                 model,
                 points,
@@ -293,6 +314,8 @@ def reconstruct(
                 max_error,
                 independent=True,
             )
+            if on_stage is not None:
+                on_stage("Validate source mesh")
             mesh_score, mesh_pairs = score_window(
                 model,
                 model["k/points"][:],
