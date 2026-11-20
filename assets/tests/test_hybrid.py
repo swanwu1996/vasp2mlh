@@ -5,10 +5,10 @@ from xml.etree import ElementTree as ET
 
 import numpy as np
 
-from vasp2mlh.band_release import check_hybrid, reference_points
+from vasp2mlh.band_release import check_convergence, check_hybrid, reference_points
 from vasp2mlh.filtering import filtered_operator, spectral_baseline
 from vasp2mlh.model import mesh_indices
-from vasp2mlh.vasp import split_mesh, xc_parameters
+from vasp2mlh.vasp import source_fermi, split_mesh, xc_parameters
 
 
 class HybridTests(unittest.TestCase):
@@ -59,6 +59,22 @@ class HybridTests(unittest.TestCase):
             (other / "vasprun.xml").write_text("hybrid run B")
             with self.assertRaisesRegex(ValueError, "same SCF"):
                 reference_points(src, other)
+
+    def test_fermi_uses_the_integration_grid_in_either_xml_order(self):
+        scf = "<dos><i name='efermi'>-3.8</i></dos>"
+        holdout = "<dos comment='kpoints_opt'><i name='efermi'>-4.1</i></dos>"
+        for sections in (holdout + scf, scf + holdout, scf):
+            self.assertEqual(
+                source_fermi(
+                    ET.fromstring("<calculation>" + sections + "</calculation>")
+                ),
+                -3.8,
+            )
+        for invalid in (holdout, scf + scf):
+            with self.assertRaisesRegex(ValueError, "source-grid Fermi"):
+                source_fermi(
+                    ET.fromstring("<calculation>" + invalid + "</calculation>")
+                )
 
     def test_opt_points_are_only_used_for_validation(self):
         optional = ET.fromstring(
@@ -124,3 +140,27 @@ class HybridTests(unittest.TestCase):
             )
 
         np.testing.assert_allclose(h(v), h(rotated), atol=1e-10)
+
+    def test_stopcar_cannot_certify_an_unconverged_exchange_state(self):
+        with TemporaryDirectory() as folder:
+            root = Path(folder)
+            meta = dict(
+                nelm=100,
+                final_scf_steps=6,
+                operator_parameters={"LHFCALC": "T"},
+                ediff_eV=1e-7,
+                final_energy_change_eV=0.05,
+            )
+            with self.assertRaisesRegex(ValueError, "unconfirmed"):
+                check_convergence(meta, root)
+            for name, value in (
+                ("ediff_eV", np.nan),
+                ("final_energy_change_eV", np.nan),
+            ):
+                with self.assertRaisesRegex(ValueError, "unconfirmed"):
+                    check_convergence({**meta, name: value}, root)
+            (root / "OUTCAR").write_text("aborting loop because hard stop was set")
+            with self.assertRaisesRegex(ValueError, "stopped"):
+                check_convergence(meta, root)
+            (root / "OUTCAR").write_text("aborting loop because EDIFF is reached")
+            check_convergence(meta, root)

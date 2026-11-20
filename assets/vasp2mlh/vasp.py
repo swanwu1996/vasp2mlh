@@ -118,6 +118,18 @@ def xc_parameters(settings):
     return {k: v for k, v in settings.items() if k in names or k.startswith("LIBXC")}
 
 
+def source_fermi(calculation):
+    """Use the integration-grid Fermi energy even when VASP writes KPOINTS_OPT first."""
+    values = [
+        dos.findtext("i[@name='efermi']")
+        for dos in calculation.findall("dos")
+        if "kpoints_opt" not in dos.get("comment", "").lower()
+    ]
+    if len(values) != 1 or values[0] is None or not np.isfinite(float(values[0])):
+        raise ValueError("Missing or ambiguous source-grid Fermi energy in vasprun.xml")
+    return float(values[0])
+
+
 def metadata(path):
     root = ET.parse(path).getroot()
     atoms = [
@@ -180,7 +192,13 @@ def metadata(path):
     mesh = root.findtext("./kpoints/generation/v[@name='divisions']")
     calcs = root.findall("./calculation")
     last = calcs[-1]
+    steps = last.findall("scstep/energy/i[@name='e_fr_energy']")
+    delta = (
+        abs(float(steps[-1].text) - float(steps[-2].text)) if len(steps) >= 2 else None
+    )
     meta = dict(
+        final_energy_change_eV=delta,
+        ediff_eV=float(param("EDIFF")),
         xml_path=Path(path).resolve(),
         operator_parameters=operator_parameters,
         atoms=Atoms(atoms, scaled_positions=frac, cell=cell, pbc=True),
@@ -202,13 +220,12 @@ def metadata(path):
         doping_charge=float(param("NELECT")) - neutral,
         titles=titles,
         energy=float(last.findtext("./energy/i[@name='e_0_energy']")),
-        efermi=float(last.findtext("./dos/i[@name='efermi']")),
+        efermi=source_fermi(last),
         eig=eigenvalues(last),
     )
     if is_hybrid(meta):
-        split_mesh(meta, root.find(".//eigenvalues_kpoints_opt"))
+        split_mesh(meta, last.find("eigenvalues_kpoints_opt"))
     return meta
-
 
 
 class Wavecar:

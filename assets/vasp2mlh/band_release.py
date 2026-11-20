@@ -49,7 +49,9 @@ def check_hybrid(meta):
     scalar_settings = {**settings, "LHFCALC": "F"}
     check_scalar({**meta, "operator_parameters": scalar_settings})
     if meta["icharg"] not in (0, 1, 2):
-        raise ValueError("Hybrid bands require self-consistent occupied orbitals (ICHARG=0, 1 or 2)")
+        raise ValueError(
+            "Hybrid bands require self-consistent occupied orbitals (ICHARG=0, 1 or 2)"
+        )
     fraction = float(settings.get("AEXX", "nan"))
     screening = float(settings.get("HFSCREEN", "nan"))
     if not 0 < fraction <= 1 or not np.isfinite(screening) or screening < 0:
@@ -80,22 +82,37 @@ def independent_points(source, reference):
 
 
 def check_convergence(meta, directory):
-    if meta["nelm"] <= 0 or meta["final_scf_steps"] < meta["nelm"]:
-        return
-    # A converged final iteration can coincide with NELM.
+    at_limit = 0 < meta["nelm"] <= meta["final_scf_steps"]
+    # STOPCAR may end a run before NELM and still produce a complete XML.
     outcar = directory / "OUTCAR"
-    reached_ediff = False
+    reason = None
     if outcar.is_file():
         with outcar.open("rb") as log:
             for line in log:
                 if b"----" in line and b" Iteration " in line:
-                    reached_ediff = False
-                if b"aborting loop because EDIFF is reached" in line:
-                    reached_ediff = True
-    if not reached_ediff:
+                    reason = None
+                if b"aborting loop because" in line:
+                    reason = line.strip()
+    if reason and b"EDIFF is reached" in reason:
+        return
+    if reason and b"stop" in reason.lower():
+        raise ValueError("VASP stopped before final electronic convergence")
+    if at_limit:
         raise ValueError(
             "Electronic iteration limit reached without confirmed final convergence"
         )
+    if is_hybrid(meta):
+        delta = meta.get("final_energy_change_eV")
+        ediff = meta["ediff_eV"]
+        if (
+            delta is None
+            or not np.isfinite([delta, ediff]).all()
+            or ediff <= 0
+            or delta > ediff + 1.01e-8
+        ):
+            raise ValueError(
+                "Hybrid SCF convergence is unconfirmed by the final energy change or OUTCAR"
+            )
 
 
 def window_mask(native, model, band_range, window):
@@ -165,10 +182,16 @@ def score_window(
 def reference_points(src, reference):
     if is_hybrid(src):
         xml = reference / "vasprun.xml"
-        if xml.resolve() != src["xml_path"] and file_sha256(xml) != file_sha256(src["xml_path"]):
-            raise ValueError("Hybrid validation requires the same SCF XML and occupied exchange orbitals")
+        if xml.resolve() != src["xml_path"] and file_sha256(xml) != file_sha256(
+            src["xml_path"]
+        ):
+            raise ValueError(
+                "Hybrid validation requires the same SCF XML and occupied exchange orbitals"
+            )
         if "holdout" not in src:
-            raise ValueError("Hybrid validation needs KPOINTS_OPT or zero-weight off-grid points in the same SCF")
+            raise ValueError(
+                "Hybrid validation needs KPOINTS_OPT or zero-weight off-grid points in the same SCF"
+            )
         ref = src["holdout"]
         return ref, independent_points(src["kpoints"], ref["kpoints"])
     ref = metadata(reference / "vasprun.xml")
@@ -283,7 +306,9 @@ def reconstruct(
     check_source(src, run)
     hybrid = is_hybrid(src)
     if hybrid and potential.resolve() != run.resolve():
-        raise ValueError("Hybrid projection uses the source WAVECAR; omit potential_run")
+        raise ValueError(
+            "Hybrid projection uses the source WAVECAR; omit potential_run"
+        )
     if floor is None:
         floor = 0.0001 if hybrid else 0.005
     xml_hash = file_sha256(run / "vasprun.xml")
@@ -315,12 +340,20 @@ def reconstruct(
     ):
         raise ValueError("Source VASP spectrum must extend above the energy window")
     if hybrid:
-        ceiling = src["efermi"] + centre_offset + 2*taper
+        ceiling = src["efermi"] + centre_offset + 2 * taper
         if np.any(src["eig"][0, :, -1] < ceiling):
-            raise ValueError("Increase hybrid NBANDS to cover the filter ceiling at every mesh point")
-        requested_top = abs_window[1] if abs_window is not None else np.max(src["eig"][0, :, band_range[1]-1])
+            raise ValueError(
+                "Increase hybrid NBANDS to cover the filter ceiling at every mesh point"
+            )
+        requested_top = (
+            abs_window[1]
+            if abs_window is not None
+            else np.max(src["eig"][0, :, band_range[1] - 1])
+        )
         if requested_top >= ceiling:
-            raise ValueError("Hybrid target window extends outside the retained spectrum")
+            raise ValueError(
+                "Hybrid target window extends outside the retained spectrum"
+            )
     output.parent.mkdir(parents=True, exist_ok=True)
     with (
         TemporaryDirectory(dir=output.parent) as scratch,
@@ -336,7 +369,9 @@ def reconstruct(
             d / "direct.h5",
             mesh=mesh,
             potential_run=None if hybrid else potential,
-            complement=src["efermi"] + centre_offset + 2 * taper + 10.0 if hybrid else 0.0,
+            complement=src["efermi"] + centre_offset + 2 * taper + 10.0
+            if hybrid
+            else 0.0,
             on_kpoint=on_kpoint,
         )
         if on_stage is not None:
@@ -367,11 +402,16 @@ def reconstruct(
         with h5py.File(candidate, "r+") as model:
             if (
                 model.attrs["potcar_sha256"] != hashes["POTCAR"]
-                or (not hybrid and model.attrs["charge_density_sha256"] != hashes["CHGCAR"])
+                or (
+                    not hybrid
+                    and model.attrs["charge_density_sha256"] != hashes["CHGCAR"]
+                )
                 or (hybrid and file_sha256(run / "WAVECAR") != hashes["WAVECAR"])
                 or file_sha256(run / "vasprun.xml") != xml_hash
             ):
-                raise ValueError("Source electronic inputs changed during reconstruction")
+                raise ValueError(
+                    "Source electronic inputs changed during reconstruction"
+                )
             basis = inspect_basis(model, expected)
             if on_stage is not None:
                 on_stage("Validate source mesh")
@@ -386,7 +426,9 @@ def reconstruct(
                 independent=False,
             )
             report = dict(
-                profile="hybrid-spectral-reconstruction/1" if hybrid else "scalar-band-reconstruction/1",
+                profile="hybrid-spectral-reconstruction/1"
+                if hybrid
+                else "scalar-band-reconstruction/1",
                 version=__version__,
                 status="source_mesh_passed"
                 if mesh_score["observations"]
@@ -425,7 +467,9 @@ def reconstruct(
                     "policy": str(model.attrs["complement_policy"]),
                     "complement_eV": float(model.attrs["complement_eV"]),
                     "source_bands": int(src["eig"].shape[-1]),
-                    "min_edge_subspace_weight": float(model["filter/min_edge_weight"][:].min()),
+                    "min_edge_subspace_weight": float(
+                        model["filter/min_edge_weight"][:].min()
+                    ),
                 }
             if reference is None:
                 group = model.create_group("source_validation")
