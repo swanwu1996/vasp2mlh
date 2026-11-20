@@ -9,7 +9,7 @@ from ase import Atoms
 from ase.io import write
 
 from vasp2mlh.basis import Shell
-from vasp2mlh.calibrate import align_ritz, calibrate
+from vasp2mlh.calibrate import align_ritz, calibrate, write_ordinary
 from vasp2mlh.filtering import filter_model
 from vasp2mlh.operator import ScalarOperator
 from vasp2mlh.overlap import overlap, quadrature_blocks
@@ -94,6 +94,55 @@ class RefinementTests(unittest.TestCase):
                 np.testing.assert_allclose(h[0], 4 * s, atol=1e-12)
                 np.testing.assert_allclose(f["filter/min_edge_weight"][:], 1.0)
                 self.assertEqual(f.attrs["hamiltonian_method"], "filtered_paw_ritz")
+
+    def test_energy_shift_on_overlap_support_outside_the_mesh(self):
+        atoms = Atoms("H", positions=[[0, 0, 0]], cell=[2, 2, 2], pbc=True)
+        r = np.array([[-1, 0, 0], [0, 0, 0], [1, 0, 0]])
+        sr = np.array([0.12, 1.0, 0.12])[:, None, None]
+        k = np.zeros((1, 3))
+        sk = sr.sum(axis=0)[None]
+        probe = [[0.37, 0, 0]]
+        with tempfile.TemporaryDirectory() as folder:
+            stored = []
+            for shift in (0, 10):
+                prefix = Path(folder) / str(shift)
+                dense = prefix.with_suffix(".h5")
+                sparse = prefix.with_suffix(".sparse")
+                with h5py.File(dense, "w") as f:
+                    f.attrs.update(
+                        format="vasp2mlh/1",
+                        shells=json.dumps({"H": [0]}),
+                        spinor=False,
+                        spin_channels=1,
+                        metric="ordinary",
+                        fermi_eV=2.0 + shift,
+                    )
+                    f["structure/Z"] = [1]
+                    f["structure/cell"] = atoms.cell.array
+                    f["structure/fractional"] = k
+                    f.create_group("basis")
+                    f["k/mesh"] = [1, 1, 1]
+                    f["k/points"] = k
+                    f["k/weights"] = [1.0]
+                    for key in (
+                        "eigenvalues",
+                        "occupation",
+                        "gram_error",
+                        "projectability",
+                    ):
+                        f["k/" + key] = np.ones((1, 1, 1))
+                    h = (3.7 + shift * sk)[None].astype(complex)
+                    f["k/H"] = h
+                    f["k/S"] = sk
+                    write_ordinary(f, f, atoms, [0, 1], r, sr, k, sk, h)
+                    np.testing.assert_allclose(matrices_k(f, k)[0], h)
+                    dense_at_probe = matrices_k(f, probe)[0]
+                sparsify(dense, sparse, cutoff=0.01, relative_pruning=True)
+                with h5py.File(sparse) as f:
+                    hp, sp = matrices_k(f, probe)
+                    stored.append([dense_at_probe, hp])
+            for initial, moved in zip(*stored):
+                np.testing.assert_allclose(moved - initial, 10 * sp[None], atol=1e-12)
 
     def test_scalar_potential_convolution(self):
         op = ScalarOperator.__new__(ScalarOperator)

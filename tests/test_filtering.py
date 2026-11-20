@@ -35,6 +35,19 @@ class FilteringTests(unittest.TestCase):
         )
         _, inv = metric_factors(psi.conj().T @ psi)
         q = psi @ inv
+        transported, projections = filtered_operator(
+            direct,
+            v,
+            energy[:stored],
+            centre,
+            width,
+            floor,
+            ceiling,
+            taper,
+            return_projections=True,
+        )
+        np.testing.assert_allclose(transported, result, atol=1e-12)
+        np.testing.assert_allclose(projections, q[:stored].conj().T, atol=1e-12)
         np.testing.assert_allclose(
             result, q.conj().T @ (energy[:, None] * q), atol=1e-12
         )

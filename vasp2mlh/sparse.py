@@ -57,6 +57,7 @@ def sparsify(
     extra_points=None,
     band_range=None,
     spinless_time_reversal=False,
+    relative_pruning=False,
 ):
     if Path(model).resolve() == Path(output).resolve():
         raise ValueError("Use a separate destination for the sparse model")
@@ -76,6 +77,17 @@ def sparsify(
             )
         imag_h = imag_s = 0.0
         geometry_overlap = src.attrs.get("metric") == "ordinary"
+        if relative_pruning and (
+            not geometry_overlap
+            or src.attrs["spinor"]
+            or "interpolation_reference_eV" not in src.attrs
+        ):
+            raise ValueError(
+                "Relative pruning requires an energy-anchored ordinary-metric scalar archive"
+            )
+        origin = (
+            float(src.attrs["interpolation_reference_eV"]) if relative_pruning else 0.0
+        )
         atoms = structure(src)
         pairs = {key: (h, s) for key, h, s in pair_blocks(src)}
         keys, hs, ss = [], [], []
@@ -102,17 +114,22 @@ def sparsify(
                 - atoms.positions[i]
                 + np.array([x, y, z]) @ atoms.cell
             )
+            tested = h - origin * s if relative_pruning else h
             # Apply the same pruning decision to a bond and its Hermitian reverse.
             if key != peer and (
                 (cutoff is not None and np.linalg.norm(dr) > cutoff + 1e-10)
                 or (
-                    max(np.linalg.norm(channel) for channel in h) <= h_tol
+                    max(np.linalg.norm(channel) for channel in tested) <= h_tol
                     and (geometry_overlap or np.linalg.norm(s) <= s_tol)
                 )
             ):
                 if geometry_overlap and np.any(s):
                     # Geometry determines S even when the H block is truncated.
-                    h = np.zeros_like(h)
+                    h = (
+                        np.broadcast_to(origin * s, h.shape)
+                        if relative_pruning
+                        else np.zeros_like(h)
+                    )
                 else:
                     continue
             keys.append(key)
@@ -162,6 +179,7 @@ def sparsify(
                 h_tol_eV=h_tol,
                 s_tol=s_tol,
                 max_allowed_band_change_eV=max_band_change,
+                relative_pruning=relative_pruning,
             )
             if spinless_time_reversal:
                 report.update(

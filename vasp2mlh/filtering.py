@@ -12,7 +12,18 @@ from .model import adjoint
 from .pipeline import file_sha256, output_file
 
 
-def filtered_operator(h, projections, energies, centre, width, floor, ceiling, taper):
+def filtered_operator(
+    h,
+    projections,
+    energies,
+    centre,
+    width,
+    floor,
+    ceiling,
+    taper,
+    *,
+    return_projections=False,
+):
     """All inputs use the orthonormal PAW trial frame and one absolute energy zero."""
     x = np.clip((ceiling - energies) / taper, 0, 1)
     weight = (1 - floor) * expit((centre - energies) / width) * x**2 * (3 - 2 * x)
@@ -21,7 +32,11 @@ def filtered_operator(h, projections, energies, centre, width, floor, ceiling, t
     moment = floor * h + (weighted * energies) @ adjoint(projections)
     _, inverse = metric_factors(gram)
     effective = inverse @ moment @ inverse
-    return (effective + adjoint(effective)) / 2
+    effective = (effective + adjoint(effective)) / 2
+    if return_projections:
+        # <orthonormal filtered trial | native PAW eigenstate>.
+        return effective, (inverse @ projections) * np.sqrt(floor + weight)
+    return effective
 
 
 def filter_model(model, overlap, output, centre_offset, width, floor, taper):

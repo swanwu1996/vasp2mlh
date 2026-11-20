@@ -145,6 +145,11 @@ def main():
         "--s-tol", type=float, default=0.0, help="overlap block Frobenius threshold"
     )
     sparse.add_argument(
+        "--relative-pruning",
+        action="store_true",
+        help="prune H minus the recorded energy origin times S, preserving energy-shift covariance",
+    )
+    sparse.add_argument(
         "--max-band-change",
         type=float,
         help="maximum accepted truncation error (eV; defaults to all bands)",
@@ -324,6 +329,7 @@ def main():
                         extra,
                         args.band_range,
                         args.spinless_time_reversal,
+                        relative_pruning=args.relative_pruning,
                     ),
                     indent=2,
                 )

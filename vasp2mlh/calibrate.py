@@ -97,9 +97,17 @@ def ordinary_geometry(src, ov):
 
 
 def write_ordinary(out, src, atoms, bounds, r_ao, s_ao, k, s_k, hnew):
-    rh, hr, _ = localized_transform(
-        k, src["k/mesh"][:], atoms, np.diff(bounds), hnew, s_k
+    # S(R) is known beyond the mesh image cell. Carry the energy origin on
+    # that exact support so an absolute energy shift gives c*S(k) at every k.
+    origin = (
+        float(src.attrs["fermi_eV"])
+        if "fermi_eV" in src.attrs
+        else float(src["k/eigenvalues"][0, 0, 0])
     )
+    rh, hr, _ = localized_transform(
+        k, src["k/mesh"][:], atoms, np.diff(bounds), hnew - origin * s_k, s_k
+    )
+    out.attrs["interpolation_reference_eV"] = origin
     translations = np.unique(np.vstack([rh, r_ao]), axis=0)
     mapping = {tuple(r): i for i, r in enumerate(translations)}
     out["real/R"] = translations
@@ -114,7 +122,9 @@ def write_ordinary(out, src, atoms, bounds, r_ao, s_ao, k, s_k, hnew):
     for i, r in enumerate(rh):
         hds[0, mapping[tuple(r)]] = hr[0, i]
     for i, r in enumerate(r_ao):
-        sds[mapping[tuple(r)]] = s_ao[i]
+        row = mapping[tuple(r)]
+        sds[row] = s_ao[i]
+        hds[0, row] = hds[0, row] + origin * s_ao[i]
     out["k/H"][:] = hnew
     out["k/S"][:] = s_k
 
