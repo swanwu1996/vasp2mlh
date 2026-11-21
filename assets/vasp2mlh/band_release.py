@@ -14,7 +14,7 @@ from ase.io import read, write
 
 from . import __version__
 from .comparison import periodic_match
-from .configuration import BOUNDED_COLLINEAR, HSE_POLAR, SCALAR_POLAR
+from .configuration import BOUNDED_COLLINEAR, HSE_POLAR, SCALAR_POLAR, SPINOR_POLAR, HUBBARD_POLAR
 from .filtering import filter_model
 from .polar import MIN_POLAR_SINGULAR_VALUE, hse_polar_model
 from .locality import locality_model, PBE_ANCHORED, PRIOR_OFFSET_EV, WINDOW_FIRST_BUFFER
@@ -608,7 +608,9 @@ def reconstruct(
     hse_polar = completion_method == HSE_POLAR
     if hse_polar and band_range is None:
         raise ValueError(f"{HSE_POLAR} requires an ordered band range")
-    polar_window = completion_method == SCALAR_POLAR
+    spinor_polar = completion_method == SPINOR_POLAR
+    hubbard_polar = completion_method == HUBBARD_POLAR
+    polar_window = completion_method in (SCALAR_POLAR, SPINOR_POLAR, HUBBARD_POLAR)
     if cutoff is None:
         cutoff = 18.0 if is_hubbard(src) or polar_window or completion_method == BOUNDED_COLLINEAR else 12.0
     pbe_dir = resolve_pbe_run(src, run, pbe_run, completion_method, retained_policy)
@@ -645,16 +647,20 @@ def reconstruct(
             "Spectral projection uses the source WAVECAR; omit potential_run"
         )
     bounded_collinear = completion_method == BOUNDED_COLLINEAR
-    if polar_window and (src["nspin"] != 1 or mode or is_hubbard(src) or band_range is None):
+    if completion_method == SCALAR_POLAR and (src["nspin"] != 1 or mode or is_hubbard(src) or band_range is None):
         raise ValueError(f"{SCALAR_POLAR} requires a nonmagnetic semilocal source and an ordered band range")
+    if hubbard_polar and (mode or not is_hubbard(src) or band_range is None):
+        raise ValueError(f"{HUBBARD_POLAR} requires scalar or collinear DFT+U and an ordered band range")
+    if spinor_polar and (not src["spinor"] or is_hybrid(src) or band_range is None):
+        raise ValueError(f"{SPINOR_POLAR} requires semilocal spinor eigenpairs and an ordered band range")
     if bounded_collinear and (src["nspin"] != 2 or mode or is_hubbard(src) or energy_window is None):
         raise ValueError(f"{BOUNDED_COLLINEAR} requires two collinear semilocal channels without U and an energy window")
-    if completion_method not in (None, PBE_ANCHORED, HSE_POLAR, BOUNDED_COLLINEAR, SCALAR_POLAR, "spectral-ritz", "locality-constrained"):
+    if completion_method not in (None, PBE_ANCHORED, HSE_POLAR, BOUNDED_COLLINEAR, SCALAR_POLAR, SPINOR_POLAR, HUBBARD_POLAR, "spectral-ritz", "locality-constrained"):
         raise ValueError(f"Unknown completion method {completion_method}")
     auto_centre = centre_offset is None
     if auto_centre:
         centre_offset = 6.0
-    localized = mode is not None and completion_method != "spectral-ritz"
+    localized = mode is not None and completion_method not in ("spectral-ritz", SPINOR_POLAR)
     if completion_method is not None and mode is None and not (bounded_collinear or polar_window):
         raise ValueError(
             "Choosing a completion method requires a hybrid or noncollinear source"
@@ -664,7 +670,8 @@ def reconstruct(
     ):
         raise ValueError("Set completion_method='spectral-ritz' to use Ritz filter controls")
     if floor is None:
-        floor = 0.0001 if mode or bounded_collinear or polar_window else 0.005
+        small_floor = (mode is not None and not spinor_polar) or bounded_collinear or completion_method == SCALAR_POLAR
+        floor = 0.0001 if small_floor else 0.005
     if pbe_dir is not None:
         pbe_hashes = pbe_input_hashes(pbe_dir)
         pbe = check_pbe_pair(src, run, pbe_dir, mesh)
@@ -713,13 +720,17 @@ def reconstruct(
             saturation_width_eV=2.0,
         )
         if polar_window:
-            window_recipe.update(method=SCALAR_POLAR, degeneracy_eV=DEGENERACY_EV, min_singular_value=MIN_POLAR_SINGULAR_VALUE)
-        elif auto_centre and mode is None:
+            window_recipe.update(method=completion_method, degeneracy_eV=DEGENERACY_EV, min_singular_value=MIN_POLAR_SINGULAR_VALUE)
+            if spinor_polar:
+                window_recipe.update(prior="bounded_spinor_spectral_ritz", prior_offset_eV=PRIOR_OFFSET_EV)
+                if auto_centre:
+                    window_recipe["filter_centre_policy"] = "spinor-window-and-available-spectrum"
+        if auto_centre and mode is None and (not polar_window or hubbard_polar):
             centre_offset = max(6.0, upper + 2.0 - src["efermi"])
             window_recipe["filter_centre_policy"] = "max-fermi-plus-6-or-target-plus-2"
     if not mode and src["efermi"] + centre_offset > float(src["eig"][:, :, -1].min()) + 1e-4:
         raise ValueError("Filter centre exceeds the available VASP band ceiling. Increase NBANDS or lower centre_offset.")
-    if mode and not localized:
+    if mode and not localized and not spinor_polar:
         ceiling = src["efermi"] + centre_offset + 2 * taper
         if np.any(src["eig"][0, :, -1] < ceiling):
             raise ValueError(
@@ -748,7 +759,7 @@ def reconstruct(
             mesh=mesh,
             potential_run=None if mode else potential,
             complement=src["efermi"]
-            + (PRIOR_OFFSET_EV if localized else centre_offset + 2 * taper + 10.0)
+            + (PRIOR_OFFSET_EV if localized or spinor_polar else centre_offset + 2 * taper + 10.0)
             if mode
             else 0.0,
             on_kpoint=on_kpoint,
@@ -849,6 +860,8 @@ def reconstruct(
                 )
             if pbe_dir is not None and pbe_input_hashes(pbe_dir) != pbe_hashes:
                 raise ValueError("PBE reference inputs changed during reconstruction")
+            if spinor_polar:
+                window_recipe = json.loads(model.attrs["polar_recipe"])
             basis = inspect_basis(model, expected)
             if on_stage is not None:
                 on_stage("Validate source mesh")
@@ -930,7 +943,7 @@ def reconstruct(
             if is_hubbard(src):
                 report.update(
                     source_functional="DFT+U",
-                    hubbard_maturity="experimental" if src["spinor"] else "beta",
+                    hubbard_maturity="experimental" if src["spinor"] or hubbard_polar else "beta",
                     hubbard_recipe=window_recipe,
                     hubbard_by_element=src["operator_parameters"]["HUBBARD_BY_ELEMENT"],
                     spin_channels=src["nspin"],
@@ -961,6 +974,8 @@ def reconstruct(
                 )
             if polar_window:
                 report.update(polar_recipe=window_recipe, polar_maturity="experimental")
+            if spinor_polar:
+                report["profile"] = "spinor-polar-window/1"
             if bounded_collinear:
                 report["collinear_recipe"] = window_recipe
             report["completion_method"] = str(model.attrs["hamiltonian_method"])

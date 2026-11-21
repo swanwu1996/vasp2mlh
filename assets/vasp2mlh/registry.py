@@ -7,7 +7,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-from .configuration import BOUNDED_COLLINEAR, HSE_POLAR, SCALAR_POLAR, load_config
+from .configuration import BOUNDED_COLLINEAR, HSE_POLAR, SCALAR_POLAR, SPINOR_POLAR, HUBBARD_POLAR, load_config
 from .basis import Shell, load_basis, read_potcar
 from .pipeline import output_file
 from .realspace import SPARSE_FORMAT, structure
@@ -233,17 +233,22 @@ def label_definition(f):
                 "Localized complement energy disagrees with its label recipe"
             )
         settings["locality_recipe"] = recipe
-    if method in {"hybrid_spectral_ritz", "spinor_spectral_ritz"}:
+    if method == SPINOR_POLAR and not np.isclose(
+        settings["complement_eV"] - attrs["fermi_eV"],
+        json.loads(attrs["polar_recipe"])["prior_offset_eV"], rtol=0, atol=1e-8
+    ):
+        raise ValueError("Spinor prior differs from its recorded Fermi offset")
+    if method in {"hybrid_spectral_ritz", "spinor_spectral_ritz", SPINOR_POLAR}:
         settings.pop("complement_eV")
         settings["complement_policy"] = attrs["complement_policy"]
-    if method in {SCALAR_POLAR, BOUNDED_COLLINEAR, "hubbard-paw-ritz-v1", "filtered_paw_ritz", "hybrid_spectral_ritz", "spinor_spectral_ritz"}:
+    if method in {SCALAR_POLAR, SPINOR_POLAR, HUBBARD_POLAR, BOUNDED_COLLINEAR, "hubbard-paw-ritz-v1", "filtered_paw_ritz", "hybrid_spectral_ritz", "spinor_spectral_ritz"}:
         for key in ("filter_width_eV", "filter_floor", "filter_taper_eV"):
             settings[key] = float(attrs[key])
         settings["centre_offset_eV"] = round(
             float(attrs["filter_centre_eV"] - attrs["fermi_eV"]), 10
         )
-    recipe_key = {BOUNDED_COLLINEAR: "collinear_recipe", SCALAR_POLAR: "polar_recipe"}.get(method, "hubbard_recipe")
-    if recipe_key in attrs or method in {"hubbard-paw-ritz-v1", BOUNDED_COLLINEAR, SCALAR_POLAR}:
+    recipe_key = {BOUNDED_COLLINEAR: "collinear_recipe", SCALAR_POLAR: "polar_recipe", SPINOR_POLAR: "polar_recipe", HUBBARD_POLAR: "polar_recipe"}.get(method, "hubbard_recipe")
+    if recipe_key in attrs or method in {"hubbard-paw-ritz-v1", BOUNDED_COLLINEAR, SCALAR_POLAR, SPINOR_POLAR, HUBBARD_POLAR}:
         recipe = json.loads(attrs[recipe_key])
         limit = recipe.pop("linear_through_eV")
         target = recipe["energy_window_from_fermi_eV"]
@@ -265,6 +270,10 @@ def label_definition(f):
                 rtol=0,
             ):
                 raise ValueError("Filter centre disagrees with its target window")
+        if recipe.get("filter_centre_policy") == "spinor-window-and-available-spectrum":
+            centre = min(max(attrs["fermi_eV"] + 6.0, limit), attrs["filter_ceiling_eV"] - 2 * attrs["filter_taper_eV"])
+            if not np.isclose(settings.pop("centre_offset_eV"), centre - attrs["fermi_eV"], atol=1e-7, rtol=0):
+                raise ValueError("Spinor filter centre disagrees with its target and ceiling")
         settings[recipe_key] = recipe
     if attrs["format"] == SPARSE_FORMAT:
         report = json.loads(attrs["truncation_report"])

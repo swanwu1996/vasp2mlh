@@ -23,7 +23,9 @@ from .configuration import (
     BATCH_CONTROLS,
     BOUNDED_COLLINEAR,
     SCALAR_POLAR,
+    SPINOR_POLAR,
     HSE_POLAR,
+    HUBBARD_POLAR,
     DEFAULT_ENERGY_WINDOW,
     backend_setting,
     load_config,
@@ -31,7 +33,7 @@ from .configuration import (
 )
 from .pipeline import build, file_sha256, output_file, projection_header
 from .operator import check_potential_records, check_potential_source
-from .vasp import is_hubbard, spectral_mode, metadata
+from .vasp import is_hubbard, is_hybrid, spectral_mode, metadata
 from xml.etree.ElementTree import ParseError
 from .realspace import SPARSE_FORMAT
 from .progress import progress_bar
@@ -185,9 +187,9 @@ def read_jobs(manifest, config=None):
                     raise ValueError(f"Unknown retained policy for job {label}")
             elif key == "completion_method":
                 choices = {
-                    "validated": (BOUNDED_COLLINEAR, SCALAR_POLAR),
+                    "validated": (BOUNDED_COLLINEAR, SCALAR_POLAR, HUBBARD_POLAR),
                     "hybrid": ("spectral-ritz", "locality-constrained", "pbe-anchored-v1", HSE_POLAR),
-                    "noncollinear": ("spectral-ritz", "locality-constrained"),
+                    "noncollinear": ("spectral-ritz", "locality-constrained", SPINOR_POLAR),
                 }[mode]
                 if value not in choices:
                     raise ValueError(f"Invalid completion method for job {label}")
@@ -509,6 +511,14 @@ def preflight(job):
         check_source(src, run)
         if job["options"].get("completion_method") == HSE_POLAR and "band_range" not in job["options"]:
             raise ValueError(f"{HSE_POLAR} requires an ordered band range")
+        if job["options"].get("completion_method") == HUBBARD_POLAR and (
+            not is_hubbard(src) or "band_range" not in job["options"]
+        ):
+            raise ValueError(f"{HUBBARD_POLAR} requires DFT+U and an ordered band range")
+        if job["options"].get("completion_method") == SPINOR_POLAR and (
+            is_hybrid(src) or "band_range" not in job["options"]
+        ):
+            raise ValueError(f"{SPINOR_POLAR} requires semilocal spinor eigenpairs and an ordered band range")
         if job["options"].get("completion_method") == SCALAR_POLAR:
             if src["nspin"] != 1 or is_hubbard(src) or "band_range" not in job["options"]:
                 raise ValueError(f"{SCALAR_POLAR} requires nonmagnetic semilocal data and an ordered band range")

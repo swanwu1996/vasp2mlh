@@ -8,7 +8,7 @@ import numpy as np
 from scipy.linalg import block_diag, eigh
 from scipy.special import expit
 
-from .configuration import BOUNDED_COLLINEAR, SCALAR_POLAR
+from .configuration import BOUNDED_COLLINEAR, SCALAR_POLAR, SPINOR_POLAR, HUBBARD_POLAR
 from .polar import MIN_POLAR_SINGULAR_VALUE, anchor_polar_window  # re-export the scalar API
 from .calibrate import metric_factors, ordinary_geometry, write_ordinary
 from .model import adjoint, spin_rotation
@@ -97,7 +97,19 @@ def filter_model(
             or src["k/H"].shape[0] != 2 or spectral or hubbard_recipe is not None
         ):
             raise ValueError("A collinear window requires a two-channel direct semilocal operator")
-        if polar_recipe is not None and (
+        spinor_polar = polar_recipe is not None and polar_recipe.get("method") == SPINOR_POLAR
+        if spinor_polar and (
+            not spectral or not src.attrs.get("spinor", False)
+            or is_hybrid({"operator_parameters": json.loads(src.attrs["xc_settings"])})
+        ):
+            raise ValueError("A spinor polar window requires semilocal spinor eigenpairs")
+        hubbard_polar = polar_recipe is not None and polar_recipe.get("method") == HUBBARD_POLAR
+        if hubbard_polar and (
+            src.attrs.get("hamiltonian_method") != "direct_hubbard_paw"
+            or spectral or src.attrs.get("spinor", False) or hubbard_recipe is None
+        ):
+            raise ValueError("A Hubbard polar window requires a direct scalar or collinear DFT+U operator")
+        if polar_recipe is not None and not (spinor_polar or hubbard_polar) and (
             src.attrs.get("hamiltonian_method") != "direct_scalar_paw"
             or src["k/H"].shape[0] != 1 or src.attrs.get("spinor", False)
             or spectral or hubbard_recipe is not None or collinear_recipe is not None
@@ -118,7 +130,16 @@ def filter_model(
         energies = src["k/eigenvalues"][:]
         ceiling = float(energies[:, :, -1].min())
         centre = float(src.attrs["fermi_eV"] + centre_offset)
-        if spectral:
+        if spinor_polar:
+            upper = float(energies[:, :, polar_recipe["band_range_1based"][1] - 1].max())
+            # Use WAVECAR precision for the spectral bound and the polar anchor.
+            polar_recipe = dict(polar_recipe, linear_through_eV=upper + polar_recipe["upper_buffer_eV"])
+            bound = polar_recipe
+            if polar_recipe.get("filter_centre_policy") == "spinor-window-and-available-spectrum":
+                centre = min(max(centre, bound["linear_through_eV"]), ceiling - 2 * taper)
+            if upper >= ceiling or centre + 2 * taper > ceiling + 1e-8:
+                raise ValueError("Increase NBANDS to cover the spinor target and filter taper")
+        elif spectral:
             required = centre + 2 * taper
             if ceiling < required:
                 raise ValueError(
@@ -200,8 +221,10 @@ def filter_model(
             )
 
             if polar_recipe is not None:
-                out.attrs["hamiltonian_method"] = SCALAR_POLAR
+                out.attrs["hamiltonian_method"] = polar_recipe["method"] if spinor_polar or hubbard_polar else SCALAR_POLAR
                 out.attrs["polar_recipe"] = json.dumps(polar_recipe)
+                if hubbard_recipe is not None:
+                    out.attrs["hubbard_recipe"] = json.dumps(polar_recipe)
             elif collinear_recipe is not None:
                 out.attrs["hamiltonian_method"] = BOUNDED_COLLINEAR
                 out.attrs["collinear_recipe"] = json.dumps(collinear_recipe)
@@ -212,5 +235,5 @@ def filter_model(
                 out.attrs["saxis"] = [0.0, 0.0, 1.0]
             if spectral:
                 out.attrs["complement_policy"] = (
-                    "filter_centre_plus_two_tapers_plus_10_eV"
+                    "source_fermi_plus_20_eV" if spinor_polar else "filter_centre_plus_two_tapers_plus_10_eV"
                 )

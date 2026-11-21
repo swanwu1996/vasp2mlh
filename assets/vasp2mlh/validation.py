@@ -9,7 +9,7 @@ import h5py
 import numpy as np
 
 from .band_release import default_reference, reference_data, score_window, pbe_input_hashes, resolve_pbe_run
-from .configuration import BOUNDED_COLLINEAR, DEFAULT_ENERGY_WINDOW, HSE_POLAR, SCALAR_POLAR
+from .configuration import BOUNDED_COLLINEAR, DEFAULT_ENERGY_WINDOW, HSE_POLAR, SCALAR_POLAR, SPINOR_POLAR, HUBBARD_POLAR
 from .pipeline import file_sha256, output_file, paths_collide
 from .vasp import metadata, screened_hybrid_maturity
 
@@ -82,12 +82,14 @@ def validate_sample(args, config):
             provenance.update(maturity)
             pbe_run = getattr(args, "pbe_run", None)
             method = getattr(args, "completion_method", None)
-            if method in ("locality-constrained", "spectral-ritz", "pbe-anchored-v1", HSE_POLAR, BOUNDED_COLLINEAR, SCALAR_POLAR):
+            if method in ("locality-constrained", "spectral-ritz", "pbe-anchored-v1", HSE_POLAR, BOUNDED_COLLINEAR, SCALAR_POLAR, SPINOR_POLAR, HUBBARD_POLAR):
                 recorded_method = provenance.get(
                     "completion_method", model.attrs.get("hamiltonian_method")
                 )
                 accepted = {
                     SCALAR_POLAR: {SCALAR_POLAR},
+                    SPINOR_POLAR: {SPINOR_POLAR},
+                    HUBBARD_POLAR: {HUBBARD_POLAR},
                     HSE_POLAR: {HSE_POLAR},
                     "pbe-anchored-v1": {"pbe-anchored-v1"},
                     BOUNDED_COLLINEAR: {BOUNDED_COLLINEAR},
