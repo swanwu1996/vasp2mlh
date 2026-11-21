@@ -497,8 +497,15 @@ def restart_for_openblas(threads, argv):
     if not any(pool["internal_api"] == "openblas" for pool in threadpool_info()):
         return False
     env = {**os.environ, "OPENBLAS_NUM_THREADS": str(threads)}
-    command = ([str(Path(sys.executable).resolve())] if getattr(sys, "frozen", False)
-               else [sys.executable, "-m", "vasp2mlh"])
+    if getattr(sys, "frozen", False):
+        executable = Path(sys.executable).resolve()
+        command = [str(executable)]
+        # The standalone aliases prepend their own subcommand on startup.
+        alias = {"v2h_valid": "valid", "v2h_genbasis": "genbasis"}.get(executable.name)
+        if alias and argv[:1] == [alias]:
+            argv = argv[1:]
+    else:
+        command = [sys.executable, "-m", "vasp2mlh"]
     status = subprocess.run([*command, *argv], env=env).returncode
     if status:
         raise SystemExit(status if status > 0 else 128 - status)
