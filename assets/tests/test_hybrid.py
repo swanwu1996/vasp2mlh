@@ -8,10 +8,20 @@ import numpy as np
 from vasp2mlh.band_release import check_convergence, check_hybrid, reference_points
 from vasp2mlh.filtering import filtered_operator, spectral_baseline
 from vasp2mlh.model import mesh_indices
-from vasp2mlh.vasp import source_fermi, split_mesh, xc_parameters
+from vasp2mlh.vasp import screened_hybrid_maturity, source_fermi, split_mesh, xc_parameters
 
 
 class HybridTests(unittest.TestCase):
+    def test_screened_hybrid_maturity(self):
+        xc = {"LHFCALC": "T", "HFSCREEN": "0.2"}
+        for spinor in (True, False):
+            self.assertEqual(
+                screened_hybrid_maturity(dict(operator_parameters=xc, spinor=spinor)),
+                {"screened_hybrid_maturity": "beta"},
+            )
+        for settings in ({}, {**xc, "LHFCALC": "F"}, {**xc, "HFSCREEN": "0"}):
+            self.assertEqual(screened_hybrid_maturity(dict(operator_parameters=settings)), {})
+
     def test_exchange_settings_and_scf(self):
         params = dict(LHFCALC="T", AEXX="0.25", HFSCREEN="0.2", HFRCUT="-1", GGA="PE")
         meta = dict(

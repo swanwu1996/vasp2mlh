@@ -193,7 +193,7 @@ def make_parser():
             "--completion-method",
             choices=("spectral-ritz", "locality-constrained"),
             default=None,
-            help="completion of the hybrid or noncollinear Hamiltonian (default: locality-constrained)",
+            help="completion of the hybrid or noncollinear Hamiltonian (screened hybrids including HSE: beta; default: locality-constrained)",
         )
         operation.add_argument(
             "--centre-offset",

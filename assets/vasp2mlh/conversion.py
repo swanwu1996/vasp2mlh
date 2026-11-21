@@ -88,4 +88,6 @@ def convert_sample(args):
         )
         result.rename(output)
         bar.update(1)
+    if report.get("screened_hybrid_maturity") == "beta":
+        print("Screened hybrid reconstruction (including HSE): beta")
     print(f"{args.format} sample: {(output / sample).absolute()}")

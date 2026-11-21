@@ -1,3 +1,4 @@
+# Screened hybrid reconstruction (including HSE) is beta. Qualify each sample with v2h_valid.
 command = "convert"
 [parameters]
 run = "."

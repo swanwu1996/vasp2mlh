@@ -49,6 +49,13 @@ def is_hybrid(meta):
     return meta.get("operator_parameters", {}).get("LHFCALC") in {"T", ".TRUE.", "TRUE"}
 
 
+def screened_hybrid_maturity(meta):
+    """Feature maturity is independent of a particular sample's validation result."""
+    if is_hybrid(meta) and float(meta["operator_parameters"].get("HFSCREEN", 0)) > 0:
+        return {"screened_hybrid_maturity": "beta"}
+    return {}
+
+
 def spectral_mode(meta):
     if meta.get("spinor"):
         return "noncollinear"

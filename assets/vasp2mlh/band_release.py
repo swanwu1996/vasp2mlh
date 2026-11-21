@@ -16,7 +16,7 @@ from .overlap import overlap
 from .pipeline import bands, build, file_sha256, output_file
 from .registry import fingerprint, inspect_basis, read_registry
 from .sparse import sparsify
-from .vasp import is_hybrid, spectral_mode, metadata
+from .vasp import is_hybrid, spectral_mode, metadata, screened_hybrid_maturity
 
 
 def check_scalar(meta):
@@ -504,6 +504,7 @@ def reconstruct(
                 },
                 input_sha256=hashes,
             )
+            report.update(screened_hybrid_maturity(src))
             if localized:
                 del report["filter_parameters"]
                 report["profile"] = f"{mode}-locality-reconstruction/1"
