@@ -180,8 +180,8 @@ def complete_subspace(
         locked = (q * e[:, None, :]) @ adjoint(q)
         z = np.linalg.qr(q, mode="complete")[0][:, :, count:]
         floor = e[:, -1, None] + COMPLEMENT_GAP_EV
-        if z.shape[-1] and scalar_prior and prior < np.max(floor):
-            raise ValueError("Localized complement prior lies inside retained bands")
+        # The prior is a soft objective center. feasible() enforces each hard
+        # complement floor even when the center lies below retained states.
         weights[ix] = singular[:, -1] ** 2
         groups.append((ix, z, locked, floor))
     target = prior * np.eye(dim) if scalar_prior else prior
