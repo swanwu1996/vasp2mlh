@@ -1,3 +1,3 @@
 """Numerical PAO Hamiltonians from VASP WAVECAR files."""
 
-__version__ = "0.6.2"
+__version__ = "0.7.0b1"

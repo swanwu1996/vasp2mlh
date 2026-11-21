@@ -13,6 +13,36 @@ from vasp2mlh.vasp import effective_hybrid_flag, screened_hybrid_maturity, sourc
 
 
 class HybridTests(unittest.TestCase):
+    def test_hubbard_species_echo_and_effective_flag(self):
+        from vasp2mlh.vasp import hubbard_parameters, check_hubbard
+
+        root = ET.fromstring("""<modeling><incar><v name="LDAUL">-1 2</v>
+          <v name="LDAUU">0 5</v><v name="LDAUJ">0 1</v></incar><parameters>
+          <i name="LDAU">T</i><v name="LDAUTYPE">2</v><v name="LDAUL">-1</v>
+          <v name="LDAUU">0</v><v name="LDAUJ">0</v></parameters></modeling>""")
+        params = root.find("parameters")
+
+        def read():
+            return hubbard_parameters(root, params, ["O", "Ni"])
+
+        settings = read()
+        self.assertEqual(
+            settings["HUBBARD_BY_ELEMENT"]["Ni"],
+            {"LDAUL": 2, "LDAUU": 5.0, "LDAUJ": 1.0},
+        )
+        with self.assertRaisesRegex(ValueError, "LMAXMIX"):
+            check_hubbard(dict(operator_parameters={**settings, "LMAXMIX": "2"}))
+        with self.assertRaisesRegex(ValueError, "ground-state"):
+            check_hubbard(dict(operator_parameters={**settings, "LDAUTYPE": 3}))
+        params.find("v[@name='LDAUU']").text = "4"
+        with self.assertRaisesRegex(ValueError, "Inconsistent"):
+            read()
+        root.remove(root.find("incar"))
+        with self.assertRaisesRegex(ValueError, "input echo"):
+            read()
+        params.find("i[@name='LDAU']").text = "F"
+        self.assertEqual(read(), {"LDAU": "F"})
+
     def test_screened_hybrid_maturity(self):
         xc = {"LHFCALC": "T", "HFSCREEN": "0.2"}
         for spinor in (True, False):

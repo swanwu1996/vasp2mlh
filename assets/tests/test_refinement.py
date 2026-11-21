@@ -144,12 +144,33 @@ class RefinementTests(unittest.TestCase):
             for initial, moved in zip(*stored):
                 np.testing.assert_allclose(moved - initial, 10 * sp[None], atol=1e-12)
 
+    def test_hubbard_saturation_preserves_window_frame_and_energy_origin(self):
+        from vasp2mlh.filtering import bound_hubbard_spectrum
+
+        recipe = {"linear_through_eV": 4.0, "saturation_width_eV": 2.0}
+        rng = np.random.default_rng(81)
+        unitary = np.linalg.qr(rng.normal(size=(4, 4)) + 1j * rng.normal(size=(4, 4)))[
+            0
+        ]
+        energies = np.array([-7.0, 1.0, 4.0, 105.0])
+        h = (unitary * energies) @ unitary.conj().T
+        result = bound_hubbard_spectrum(h, recipe)
+        np.testing.assert_allclose(
+            result @ unitary[:, :3], unitary[:, :3] * energies[:3], atol=1e-12
+        )
+        self.assertAlmostEqual(np.linalg.eigvalsh(result)[-1], 6.0)
+        moved = bound_hubbard_spectrum(
+            h + 7 * np.eye(4), dict(recipe, linear_through_eV=11.0)
+        )
+        np.testing.assert_allclose(moved, result + 7 * np.eye(4), atol=1e-12)
+
     def test_scalar_potential_convolution(self):
         op = ScalarOperator.__new__(ScalarOperator)
         op.shape = (9, 3, 3)
         x = 2 * np.pi * np.arange(9) / 9
         op.potential = (2 + np.cos(x))[:, None, None] * np.ones(op.shape)
-        op.blocks = {"dij": np.array([[1.75]])}
+        op.dij_channels = [np.array([[1.75]])]
+        op.local_channels = [op.potential]
         q = np.array([[-1.0, 0, 0], [0.0, 0, 0], [1.0, 0, 0]])
         p = np.array([[1j], [0.2], [-0.4j]])
         vectors = np.diag([1.0, 1j, -2])

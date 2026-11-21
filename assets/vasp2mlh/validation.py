@@ -3,7 +3,7 @@
 import json
 from pathlib import Path
 from .readback import verify_export
-from .operator_action import ActionUnavailable, audit as audit_action
+from .operator_action import independent_action
 
 import h5py
 import numpy as np
@@ -11,7 +11,7 @@ import numpy as np
 from .band_release import default_reference, reference_data, score_window, pbe_input_hashes, resolve_pbe_run
 from .configuration import DEFAULT_ENERGY_WINDOW
 from .pipeline import file_sha256, output_file, paths_collide
-from .vasp import spectral_mode, metadata, screened_hybrid_maturity
+from .vasp import metadata, screened_hybrid_maturity
 
 
 def validate_sample(args, config):
@@ -92,6 +92,14 @@ def validate_sample(args, config):
                     )
             elif pbe_run is not None or method == "pbe-anchored-v1":
                 raise ValueError("This model was not built with the specified PBE anchor")
+            hashes = provenance["input_sha256"]
+            if "potential_h5" in hashes:
+                potential = Path(args.potential_run) if args.potential_run else run
+                if (
+                    file_sha256(potential / "vaspout.h5") != hashes["potential_h5"]
+                    or file_sha256(run / "WAVECAR") != hashes["WAVECAR"]
+                ):
+                    raise ValueError("DFT+U potential or source WAVECAR differs from the recorded conversion")
             if not args.reference:
                 reference = default_reference(src, run)
             ref, selected = reference_data(src, reference, provenance["input_sha256"])
@@ -110,10 +118,30 @@ def validate_sample(args, config):
                         "Energy window bounds must be finite and increasing"
                     )
                 absolute = (np.asarray(window) + src["efermi"]).tolist()
+            if "hubbard_recipe" in provenance:
+                if absolute is not None:
+                    top = absolute[1]
+                else:
+                    first, last = args.band_range
+                    if (
+                        not 1
+                        <= first
+                        <= last
+                        <= min(src["eig"].shape[-1], ref["eig"].shape[-1])
+                    ):
+                        raise ValueError(
+                            "Band range exceeds the DFT+U source or reference spectrum"
+                        )
+                    top = max(
+                        float(np.max(src["eig"][:, :, last - 1])),
+                        float(np.max(ref["eig"][:, selected, last - 1])),
+                    )
+                if top > provenance["hubbard_recipe"]["linear_through_eV"] + 1e-4:
+                    raise ValueError("Requested bands exceed the stored DFT+U linear energy domain; reconvert for this target")
             mesh, _ = score_window(
                 model,
                 src["kpoints"],
-                src["eig"][0],
+                src["eig"],
                 args.band_range,
                 absolute,
                 np.inf,
@@ -123,7 +151,7 @@ def validate_sample(args, config):
             blind, _ = score_window(
                 model,
                 ref["kpoints"][selected],
-                ref["eig"][0, selected],
+                ref["eig"][:, selected],
                 args.band_range,
                 absolute,
                 np.inf,
@@ -134,7 +162,7 @@ def validate_sample(args, config):
                 name
                 for name, score in (("source mesh", mesh), ("independent", blind))
                 if score.get("observations")
-                and (score["rmse_eV"] > limits[0] or score["max_error_eV"] > limits[1])
+                and (score.get("worst_channel_rmse_eV", score["rmse_eV"]) > limits[0] or score["max_error_eV"] > limits[1])
             ]
             report = dict(
                 provenance,
@@ -158,26 +186,7 @@ def validate_sample(args, config):
             report["export_validation"] = verify_export(
                 output, args.format, model, ref["kpoints"][selected], args.nao_max
             )
-            action_run = run if spectral_mode(src) else reference
-            if spectral_mode(src) and "zero_weight" not in src:
-                action = {
-                    "status": "unavailable",
-                    "reason": "No independent zero-weight WAVECAR records in the source SCF",
-                }
-            elif (
-                not (action_run / "WAVECAR").is_file()
-                or (action_run / "WAVECAR").stat().st_size == 0
-            ):
-                action = {"status": "unavailable", "reason": "No independent WAVECAR"}
-            else:
-                try:
-                    result = audit_action(
-                        action_run, [model_path], window, args.band_range
-                    )
-                    action = {"status": "measured", **result[str(model_path)]}
-                except ActionUnavailable as exc:
-                    action = {"status": "unavailable", "reason": str(exc)}
-            report["operator_action"] = action
+            report["operator_action"] = independent_action(src, run, reference, model_path, window, args.band_range)
     except Exception as exc:
         report.update(status="failed", error=str(exc))
         if output.is_dir():
@@ -190,5 +199,12 @@ def validate_sample(args, config):
         f"Independent band error: RMS {1000 * blind['rmse_eV']:.3f} meV, maximum {1000 * blind['max_error_eV']:.3f} meV; {blind['observations']} states on {blind['scored_k']}/{len(selected)} independent k points"
     )
     print(f"Validation report: {target.absolute()}")
+    for entry in blind.get("spin_scores", []):
+        if entry["observations"]:
+            print(
+                f"Spin {entry['spin_1based']}: RMS {1000 * entry['rmse_eV']:.3f} meV, maximum {1000 * entry['max_error_eV']:.3f} meV ({entry['observations']} states)"
+            )
+        else:
+            print(f"Spin {entry['spin_1based']}: no independent states in the target window")
     if failed:
         raise ValueError(f"Band error limits exceeded on {', '.join(failed)}")

@@ -149,7 +149,7 @@ def read_jobs(manifest, config=None):
             if options.get(key) == "auto":
                 del options[key]
         if mode != "projection":
-            options = {"cutoff": 12.0, "max_rmse": 0.010, "max_error": 0.050, **options}
+            options = {"max_rmse": 0.010, "max_error": 0.050, **options}
         if row.keys() - allowed or options.keys() - modes[mode]:
             raise ValueError(f"Unknown field or option for {mode} job {label}")
         if mode in ("validated", "hybrid", "noncollinear") and not options.keys() & {
@@ -158,11 +158,11 @@ def read_jobs(manifest, config=None):
         }:
             options["energy_window"] = list(DEFAULT_ENERGY_WINDOW)
         if mode in ("validated", "hybrid", "noncollinear") and (
-            not {"cutoff", "max_rmse", "max_error"} <= options.keys()
+            not {"max_rmse", "max_error"} <= options.keys()
             or len(options.keys() & {"energy_window", "band_range"}) != 1
         ):
             raise ValueError(
-                f"Job {label} needs cutoff, both tolerances and exactly one window"
+                f"Job {label} needs both tolerances and exactly one window"
             )
         for key, value in options.items():
             if key in ("mesh", "band_range", "energy_window"):
@@ -220,6 +220,11 @@ def input_paths(job):
     ]
     if job["mode"] == "validated":
         potential, reference = job["potential_run"], job["reference"]
+        if (reference / "WAVECAR").is_file():
+            from .vasp import is_hubbard
+
+            if is_hubbard(metadata(source / "vasprun.xml")):
+                paths.append(reference / "WAVECAR")
         paths += [source / "CHGCAR", potential / "vaspout.h5"]
         for folder in (potential, reference):
             paths.extend(folder / n for n in ("vasprun.xml", "POTCAR", "CHGCAR"))
@@ -372,6 +377,14 @@ def convert(job, output, threads, backend=None, fast_resume=False):
                         k: report[k]
                         for k in ("rmse_eV", "max_error_eV", "observations")
                     }
+                    if report.get("source_functional") == "DFT+U":
+                        metrics.update(
+                            source_functional="DFT+U",
+                            hubbard_maturity=report["hubbard_maturity"],
+                            operator_action=report["operator_action"],
+                        )
+                        if "spin_scores" in report:
+                            metrics["spin_scores"] = report["spin_scores"]
                 else:
                     options = job["options"].copy()
                     cutoff = options.pop("cutoff", None)

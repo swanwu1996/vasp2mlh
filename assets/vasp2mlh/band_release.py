@@ -18,7 +18,7 @@ from .overlap import overlap
 from .pipeline import bands, build, file_sha256, output_file, projection_header
 from .registry import fingerprint, inspect_basis, read_registry
 from .sparse import sparsify
-from .vasp import is_hybrid, spectral_mode, metadata, screened_hybrid_maturity, split_mesh
+from .vasp import check_hubbard, is_hubbard, is_hybrid, spectral_mode, metadata, screened_hybrid_maturity, split_mesh
 
 
 def check_scalar(meta):
@@ -28,13 +28,16 @@ def check_scalar(meta):
             f"VASP used LREAL={meta['lreal']}. For scalar reconstruction, rerun "
             "with LREAL=.FALSE., ISYM=-1 and WRT_POTENTIAL=total paw on a full mesh."
         )
+    hubbard = is_hubbard(meta)
+    if hubbard:
+        check_hubbard(meta)
     if (
-        meta["nspin"] != 1
+        meta["nspin"] not in ((1, 2) if hubbard else (1,))
         or meta["spinor"]
         or meta["soc"]
         or any(
             settings.get(tag, "F") not in ("F", ".FALSE.", "FALSE")
-            for tag in ("LHFCALC", "LDAU", "LUSE_VDW", "LSPIRAL")
+            for tag in ("LHFCALC", "LUSE_VDW", "LSPIRAL")
         )
         or settings.get("METAGGA", "") not in ("", "--", "F", "NONE", ".FALSE.")
         or settings.get("XC", "") not in ("", "--", "NONE")
@@ -49,6 +52,8 @@ def check_scalar(meta):
 def check_hybrid(meta):
     settings = meta["operator_parameters"]
     # The generalized-KS spectrum is the source of the nonlocal exchange contribution.
+    if is_hubbard(meta):
+        raise ValueError("Combined hybrid and DFT+U is unsupported")
     scalar_settings = {**settings, "LHFCALC": "F"}
     check_scalar({**meta, "operator_parameters": scalar_settings})
     if meta["icharg"] not in (0, 1, 2):
@@ -105,7 +110,7 @@ def check_convergence(meta, directory):
         raise ValueError(
             "Electronic iteration limit reached without confirmed final convergence"
         )
-    if spectral_mode(meta):
+    if spectral_mode(meta) or is_hubbard(meta):
         delta = meta.get("final_energy_change_eV")
         ediff = meta["ediff_eV"]
         if (
@@ -149,20 +154,29 @@ def window_mask(native, model, band_range, window):
 def score_window(
     model, points, native, band_range, window, max_rmse, max_error, *, independent
 ):
-    levels = bands(model, points)[0]
-    ki, bi = np.nonzero(window_mask(native, levels, band_range, window))
+    levels = bands(model, points)
+    native = np.asarray(native)
+    if native.ndim == 2:
+        native = native[None]
+    if native.ndim != 3 or levels.shape[:2] != native.shape[:2]:
+        raise ValueError("Reference and model spin or k-point counts differ")
+    channels, point_ids, band_ids = [], [], []
+    for channel, (target, spectrum) in enumerate(zip(native, levels)):
+        ki, bi = np.nonzero(window_mask(target, spectrum, band_range, window))
+        channels.append(np.full(len(ki), channel, dtype=int))
+        point_ids.append(ki)
+        band_ids.append(bi)
+    spins, ki, bi = map(np.concatenate, (channels, point_ids, band_ids))
     pairs = {
         "k_index": ki,
         "band_1based": bi + 1,
-        "vasp_eV": native[ki, bi],
-        "reconstructed_eV": levels[ki, bi],
+        "vasp_eV": native[spins, ki, bi],
+        "reconstructed_eV": levels[spins, ki, bi],
     }
     summary = {"scored_k": len(np.unique(ki)), "observations": len(ki)}
     if not len(ki):
         if independent:
-            raise ValueError(
-                "No states in the declared window at independent validation points"
-            )
+            raise ValueError("No states in the declared window at independent validation points")
         return summary, pairs
     error = pairs["reconstructed_eV"] - pairs["vasp_eV"]
     peak = int(np.argmax(abs(error)))
@@ -175,10 +189,29 @@ def score_window(
         worst_band_1based=int(bi[peak] + 1),
         worst_k=points[ki[peak]].tolist(),
     )
-    if rmse > max_rmse or maximum > max_error:
+    worst_channel_rmse = rmse
+    if len(native) > 1:
+        pairs["spin_1based"] = spins + 1
+        per_spin = []
+        for i in range(len(native)):
+            errors = error[spins == i]
+            entry = {"spin_1based": i + 1, "observations": len(errors)}
+            if len(errors):
+                entry.update(
+                    rmse_eV=float(np.sqrt(np.mean(errors**2))),
+                    max_error_eV=float(np.max(abs(errors))),
+                )
+                worst_channel_rmse = max(worst_channel_rmse, entry["rmse_eV"])
+            per_spin.append(entry)
+        summary.update(
+            spin_scores=per_spin,
+            worst_channel_rmse_eV=worst_channel_rmse,
+            worst_spin_1based=int(spins[peak] + 1),
+        )
+    if worst_channel_rmse > max_rmse or maximum > max_error:
         sample = "Independent" if independent else "Source mesh"
         raise ValueError(
-            f"{sample} band validation failed: RMS {rmse:.8g} eV (limit {max_rmse:g}), maximum {maximum:.8g} eV (limit {max_error:g}), band {bi[peak] + 1}, k={points[ki[peak]].tolist()}"
+            f"{sample} band validation failed: RMS {worst_channel_rmse:.8g} eV (limit {max_rmse:g}), maximum {maximum:.8g} eV (limit {max_error:g}), band {bi[peak] + 1}, k={points[ki[peak]].tolist()}"
         )
     return summary, pairs
 
@@ -213,6 +246,7 @@ def reference_points(src, reference):
         or not np.isclose(src["nelect"], ref["nelect"], atol=1e-7, rtol=0)
         or not np.isclose(src["encut"], ref["encut"], atol=1e-7, rtol=0)
         or src["operator_parameters"] != ref["operator_parameters"]
+        or src["nspin"] != ref["nspin"]
         or src["spline"] != ref["spline"]
         or src["titles"] != ref["titles"]
     ):
@@ -269,12 +303,17 @@ def reference_data(src, reference, hashes):
 
 
 def check_source(src, run):
+    if is_hubbard(src):
+        check_hubbard(src)
     if src.get("spinor"):
         if src["nspin"] != 1 or src["icharg"] not in (0, 1, 2):
             raise ValueError(
                 "Spinor bands require a self-consistent vasp_ncl spin density"
             )
         scalar = {**src, "spinor": False, "soc": False}
+        if is_hubbard(src):
+            # Same-SCF spinor eigenpairs include U and do not read a frozen CHGCAR.
+            scalar["operator_parameters"] = {**src["operator_parameters"], "LDAU": "F"}
         if is_hybrid(src):
             check_hybrid(scalar)
         else:
@@ -393,6 +432,8 @@ def check_pbe_exchange(meta, directory, *, screened):
 
 def check_pbe_pair(src, run, directory, mesh=None):
     pbe = metadata(directory / "vasprun.xml")
+    if is_hubbard(pbe):
+        raise ValueError("A DFT+U calculation cannot serve as the pure PBE anchor")
     if is_hybrid(pbe):
         raise ValueError(
             "pbe_run contains a hybrid calculation (LHFCALC=T); supply semilocal PBE"
@@ -462,7 +503,7 @@ def reconstruct(
     reference,
     output,
     *,
-    cutoff,
+    cutoff=None,
     max_rmse,
     max_error,
     band_range=None,
@@ -473,7 +514,7 @@ def reconstruct(
     relative_pruning=False,
     completion_method=None,
     retained_policy=None,
-    centre_offset=6.0,
+    centre_offset=None,
     width=1.0,
     floor=None,
     taper=2.0,
@@ -489,8 +530,8 @@ def reconstruct(
     ):
         raise ValueError("Energy window bounds must be finite and increasing")
     if (
-        not np.isfinite([cutoff, max_rmse, max_error]).all()
-        or cutoff <= 0
+        not np.isfinite([max_rmse, max_error]).all()
+        or (cutoff is not None and (not np.isfinite(cutoff) or cutoff <= 0))
         or min(max_rmse, max_error) < 0
     ):
         raise ValueError(
@@ -505,6 +546,8 @@ def reconstruct(
     xml_hash = file_sha256(run / "vasprun.xml")
     src = metadata(run / "vasprun.xml")
     check_source(src, run)
+    if cutoff is None:
+        cutoff = 18.0 if is_hubbard(src) else 12.0
     pbe_dir = resolve_pbe_run(src, run, pbe_run, completion_method, retained_policy)
     if completion_method == "auto":
         completion_method = None
@@ -540,6 +583,9 @@ def reconstruct(
         )
     if completion_method not in (None, PBE_ANCHORED, "spectral-ritz", "locality-constrained"):
         raise ValueError(f"Unknown hybrid method {completion_method}")
+    auto_centre = centre_offset is None
+    if auto_centre:
+        centre_offset = 6.0
     localized = mode is not None and completion_method != "spectral-ritz"
     if completion_method is not None and mode is None:
         raise ValueError(
@@ -556,16 +602,18 @@ def reconstruct(
         pbe = check_pbe_pair(src, run, pbe_dir, mesh)
     inputs_for_hash = ("POTCAR", "WAVECAR") if mode else ("POTCAR", "CHGCAR")
     hashes = {name: file_sha256(run / name) for name in inputs_for_hash}
+    if is_hubbard(src) and not mode:
+        hashes.update(WAVECAR=file_sha256(run / "WAVECAR"), potential_h5=file_sha256(potential / "vaspout.h5"))
     if reference is not None:
         ref, selected = reference_data(src, reference, hashes)
         points = ref["kpoints"][selected]
-        ref_levels = ref["eig"][0, selected]
+        ref_levels = ref["eig"][:, selected]
     a = src["atoms"]
     fixed = read_registry(registry, a.get_chemical_symbols())
     expected = {s: fingerprint(v) for s, v in fixed.items()}
     source_bands = src["eig"].shape[-1]
     if reference is not None:
-        source_bands = min(source_bands, ref_levels.shape[1])
+        source_bands = min(source_bands, ref_levels.shape[-1])
     if (
         band_range is not None
         and not 1 <= band_range[0] <= band_range[1] <= source_bands
@@ -578,9 +626,27 @@ def reconstruct(
     )
     if abs_window is not None and (
         not np.isfinite(abs_window).all()
-        or np.any(src["eig"][0, :, -1] <= abs_window[1])
+        or np.any(src["eig"][:, :, -1] <= abs_window[1])
     ):
         raise ValueError("Source VASP spectrum must extend above the energy window")
+    hubbard_recipe = None
+    if is_hubbard(src):
+        upper = (
+            abs_window[1]
+            if abs_window is not None
+            else float(np.max(src["eig"][:, :, band_range[1] - 1]))
+        )
+        hubbard_recipe = dict(
+            method="window-bounded-paw-v1",
+            band_range_1based=band_range,
+            energy_window_from_fermi_eV=energy_window,
+            linear_through_eV=upper + 2.0,
+            upper_buffer_eV=2.0,
+            saturation_width_eV=2.0,
+        )
+        if auto_centre and mode is None:
+            centre_offset = max(6.0, upper + 2.0 - src["efermi"])
+            hubbard_recipe["filter_centre_policy"] = "max-fermi-plus-6-or-target-plus-2"
     if mode and not localized:
         ceiling = src["efermi"] + centre_offset + 2 * taper
         if np.any(src["eig"][0, :, -1] < ceiling):
@@ -653,6 +719,7 @@ def reconstruct(
                 d / "filtered.h5",
                 band_range,
                 energy_window,
+                hubbard_recipe=hubbard_recipe,
                 pbe_model=pbe_model,
                 retained_policy=retained_policy,
             )
@@ -666,6 +733,7 @@ def reconstruct(
                 floor,
                 taper,
                 spectral=bool(mode),
+                hubbard_recipe=hubbard_recipe,
             )
         if on_stage is not None:
             on_stage("Sparsify H(R)")
@@ -673,7 +741,7 @@ def reconstruct(
             d / "filtered.h5",
             candidate,
             cutoff=cutoff,
-            spinless_time_reversal=not src["spinor"],
+            spinless_time_reversal=not src["spinor"] and src["nspin"] == 1,
             band_range=band_range,
             relative_pruning=relative_pruning,
         )
@@ -684,7 +752,18 @@ def reconstruct(
                     not mode
                     and model.attrs["charge_density_sha256"] != hashes["CHGCAR"]
                 )
-                or (mode and file_sha256(run / "WAVECAR") != hashes["WAVECAR"])
+                or (
+                    "WAVECAR" in hashes
+                    and file_sha256(run / "WAVECAR") != hashes["WAVECAR"]
+                )
+                or (
+                    "potential_h5" in hashes
+                    and (
+                        model.attrs["potential_sha256"] != hashes["potential_h5"]
+                        or file_sha256(potential / "vaspout.h5")
+                        != hashes["potential_h5"]
+                    )
+                )
                 or file_sha256(run / "vasprun.xml") != xml_hash
             ):
                 raise ValueError(
@@ -698,7 +777,7 @@ def reconstruct(
             mesh_score, mesh_pairs = score_window(
                 model,
                 model["k/points"][:],
-                src["eig"][0],
+                src["eig"],
                 band_range,
                 abs_window,
                 max_rmse,
@@ -753,6 +832,29 @@ def reconstruct(
                 if is_hybrid(src)
                 else "semilocal"
             )
+            if is_hubbard(src):
+                report.update(
+                    source_functional="DFT+U",
+                    hubbard_maturity="experimental" if src["spinor"] else "beta",
+                    hubbard_recipe=hubbard_recipe,
+                    hubbard_by_element=src["operator_parameters"]["HUBBARD_BY_ELEMENT"],
+                    spin_channels=src["nspin"],
+                )
+                if src["spinor"]:
+                    report["operator_source"] = (
+                        "self-consistent DFT+U spinor eigenpairs"
+                    )
+                else:
+                    report.update(
+                        profile="dft-u-paw-reconstruction/1",
+                        operator_source="vaspout.h5:results/paw/dij",
+                        paw_rayleigh_max_eV=float(
+                            np.max(model["k/operator_edge_rayleigh_error_eV"])
+                        ),
+                        paw_residual_max_eV=float(
+                            np.max(model["k/operator_edge_residual_norm_eV"])
+                        ),
+                    )
             report["completion_method"] = str(model.attrs["hamiltonian_method"])
             report.update(screened_hybrid_maturity(src))
             if localized:
@@ -832,4 +934,12 @@ def reconstruct(
             mesh_group = group.create_group("source_mesh")
             for name, values in mesh_pairs.items():
                 mesh_group[name] = values
+        if reference is not None and is_hubbard(src):
+            from .operator_action import independent_action
+
+            report["operator_action"] = independent_action(
+                src, run, reference, candidate, energy_window, band_range
+            )
+            with h5py.File(candidate, "r+") as model:
+                model["band_validation"].attrs["report"] = json.dumps(report, allow_nan=False)
     return report

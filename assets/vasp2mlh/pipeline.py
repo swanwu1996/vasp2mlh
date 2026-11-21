@@ -22,7 +22,7 @@ from .model import (
     localized_transform,
     bloch,
 )
-from .vasp import Wavecar, plane_waves, metadata, xc_parameters, split_mesh
+from .vasp import is_hubbard, Wavecar, plane_waves, metadata, xc_parameters, split_mesh
 
 
 def paths_collide(output, inputs):
@@ -188,12 +188,16 @@ def build(
                         raise ValueError(
                             "POTCAR and exported PAW augmentation matrices disagree"
                         )
-                    mat = ao.conj().T @ operator.apply(q, point, w.cell, p, ao)
+                    mat = ao.conj().T @ operator.apply(q, point, w.cell, p, ao, spin)
                     hs[spin, ik] = (mat + mat.conj().T) / 2
                     nocc = int(np.ceil(meta["nelect"] / 2))
-                    edge = slice(max(0, nocc - 2), min(w.nb, nocc + 2))
+                    if is_hubbard(meta):
+                        # Locate each k- and spin-resolved edge in its own spectrum.
+                        nocc = int(np.searchsorted(bands[:, 0], meta["efermi"]))
+                    first = 0 if is_hubbard(meta) else max(0, nocc - 2)
+                    edge = slice(first, min(w.nb, nocc + 2))
                     ce = coeff[:, edge]
-                    hce = operator.apply(q, point, w.cell, p, ce)
+                    hce = operator.apply(q, point, w.cell, p, ce, spin)
                     sce = ce + p @ (d @ (p.conj().T @ ce))
                     residual = hce - sce * bands[edge, 0]
                     residual_norm.append(float(np.linalg.norm(residual, axis=0).max()))
@@ -203,10 +207,25 @@ def build(
             if on_kpoint is not None:
                 on_kpoint(ik + 1, len(k))
         if operator is not None:
-            f["k"].attrs["operator_edge_definition"] = "nominal_valence_edge: ceil(NELECT/2)"
+            if is_hubbard(meta):
+                # Reject a mismatched or incomplete D_ij even when XML and geometry agree.
+                if (
+                    not np.isfinite(rayleigh_error).all()
+                    or not np.isfinite(residual_norm).all()
+                    or max(rayleigh_error) > 0.001
+                    or max(residual_norm) > 0.010
+                ):
+                    raise ValueError(
+                        f"DFT+U PAW eigenpair check failed: max Rayleigh {max(rayleigh_error):.5g} eV, residual {max(residual_norm):.5g} eV"
+                    )
+                f["k"].attrs["operator_edge_definition"] = (
+                    "all states below Fermi plus two upper bands for each k/spin"
+                )
+            else:
+                f["k"].attrs["operator_edge_definition"] = "nominal_valence_edge: ceil(NELECT/2)"
             f["k/operator_edge_rayleigh_error_eV"] = rayleigh_error
             f["k/operator_edge_residual_norm_eV"] = residual_norm
-            f.attrs["hamiltonian_method"] = "direct_scalar_paw"
+            f.attrs["hamiltonian_method"] = "direct_hubbard_paw" if meta["operator_parameters"].get("LDAU") == "T" else "direct_scalar_paw"
             f.attrs["potential_sha256"] = file_sha256(
                 Path(potential_run) / "vaspout.h5"
             )

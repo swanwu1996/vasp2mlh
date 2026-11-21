@@ -56,8 +56,8 @@ def screened_hybrid_maturity(meta):
     return {}
 
 
-def effective_hybrid_flag(parameters):
-    """Read effective exchange activation from the completed run's parameters."""
+def effective_flag(parameters, name):
+    """Read a single effective logical flag from the completed run."""
     flags = {
         "T": "T",
         "TRUE": "T",
@@ -68,13 +68,89 @@ def effective_hybrid_flag(parameters):
     }
     values = {
         flags.get((node.text or "").strip().upper())
-        for node in parameters.findall(".//*[@name='LHFCALC']")
+        for node in parameters.findall(f".//*[@name='{name}']")
     }
     if values not in ({"T"}, {"F"}):
         raise ValueError(
-            "Missing, ambiguous or invalid effective LHFCALC in VASP XML; cannot identify the functional"
+            f"Missing, ambiguous or invalid effective {name} in VASP XML; cannot identify the functional"
         )
     return values.pop()
+
+
+def effective_hybrid_flag(parameters):
+    return effective_flag(parameters, "LHFCALC")
+
+
+def hubbard_parameters(root, params, symbols):
+    """Reconcile VASP 6's first-species effective XML vectors with the input echo."""
+    flag = effective_flag(params, "LDAU")
+    if flag == "F":
+        return {"LDAU": flag}
+    if not symbols or len(set(symbols)) != len(symbols):
+        raise ValueError("DFT+U needs distinct element-resolved PAW types")
+    mode = int(params.findtext(".//*[@name='LDAUTYPE']", "0"))
+    vectors = {}
+    for name, cast, default in (
+        ("LDAUL", int, 2),
+        ("LDAUU", float, 0.0),
+        ("LDAUJ", float, 0.0),
+    ):
+
+        def vector(section):
+            nodes = (
+                section.findall(f".//*[@name='{name}']") if section is not None else []
+            )
+            if len(nodes) > 1:
+                raise ValueError(f"Ambiguous DFT+U {name} in VASP XML")
+            return [cast(x) for x in (nodes[0].text or "").split()] if nodes else []
+
+        effective = vector(params)
+        requested = vector(root.find("incar"))
+        if len(effective) == len(symbols):
+            values = effective
+        elif len(effective) == 1:
+            if root.find("incar") is None:
+                raise ValueError(
+                    f"Missing complete input echo for multi-species {name}"
+                )
+            values = requested or [default] * len(symbols)
+        else:
+            raise ValueError(f"Missing or incomplete effective {name} in VASP XML")
+        if (
+            len(values) != len(symbols)
+            or values[: len(effective)] != effective
+            or (requested and requested != values)
+            or not np.isfinite(values).all()
+        ):
+            raise ValueError(f"Inconsistent species-resolved DFT+U {name}")
+        vectors[name] = values
+    sites = {
+        s: {key: values[i] for key, values in vectors.items()}
+        for i, s in enumerate(symbols)
+    }
+    return {"LDAU": flag, "LDAUTYPE": mode, "HUBBARD_BY_ELEMENT": sites}
+
+
+def is_hubbard(meta):
+    return meta.get("operator_parameters", {}).get("LDAU") in ("T", "TRUE", ".TRUE.")
+
+
+def check_hubbard(meta):
+    settings = meta["operator_parameters"]
+    if settings.get("LDAUTYPE") not in (1, 2, 4):
+        raise ValueError(
+            "DFT+U reconstruction supports ground-state LDAUTYPE 1, 2 and 4"
+        )
+    if is_hybrid(meta):
+        raise ValueError("Combined hybrid and DFT+U is unsupported")
+    sites = settings.get("HUBBARD_BY_ELEMENT")
+    if not sites or any(v["LDAUL"] not in (-1, 0, 1, 2, 3) for v in sites.values()):
+        raise ValueError("Invalid DFT+U correlated shell definition")
+    required = 2 * max(v["LDAUL"] for v in sites.values())
+    if not meta.get("spinor") and int(settings.get("LMAXMIX", 0)) < required:
+        raise ValueError(
+            f"DFT+U density and independent bands require LMAXMIX >= {required}"
+        )
 
 
 def spectral_mode(meta):
@@ -153,6 +229,8 @@ def xc_parameters(settings):
     }
     if is_hybrid({"operator_parameters": settings}):
         names |= HYBRID_TAGS
+    if is_hubbard({"operator_parameters": settings}):
+        names |= {"LDAUTYPE", "HUBBARD_BY_ELEMENT"}
     return {k: v for k, v in settings.items() if k in names or k.startswith("LIBXC")}
 
 
@@ -249,6 +327,7 @@ def metadata(path):
     }
     operator_parameters["LHFCALC"] = effective_hybrid_flag(params)
     types = root.findall("./atominfo/array[@name='atomtypes']/set/rc")
+    operator_parameters.update(hubbard_parameters(root, params, [row[1].text.strip() for row in types]))
     neutral = sum(int(row[0].text) * float(row[3].text) for row in types)
     titles = {row[1].text.strip(): row[4].text.strip() for row in types}
     mesh = root.findtext("./kpoints/generation/v[@name='divisions']")

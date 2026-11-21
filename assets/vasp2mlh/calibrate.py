@@ -139,14 +139,14 @@ def write_ordinary(out, src, atoms, bounds, r_ao, s_ao, k, s_k, hnew, *, referen
     out["real/R"] = translations
     hds = out.create_dataset(
         "real/H",
-        shape=(1, len(translations), hnew.shape[-1], hnew.shape[-1]),
+        shape=(hnew.shape[0], len(translations), hnew.shape[-1], hnew.shape[-1]),
         dtype="c16",
     )
     sds = out.create_dataset(
         "real/S", shape=(len(translations), bounds[-1], bounds[-1]), dtype="f8"
     )
     for i, r in enumerate(rh):
-        hds[0, mapping[tuple(r)]] = hr[0, i]
+        hds[:, mapping[tuple(r)]] = hr[:, i]
     if reference is not None:
         for i, r in enumerate(ref_r):
             row = mapping[tuple(r)]
@@ -158,7 +158,7 @@ def write_ordinary(out, src, atoms, bounds, r_ao, s_ao, k, s_k, hnew, *, referen
             continue
         for start in range(0, hnew.shape[-1], dim):
             sl = slice(start, start + dim)
-            hds[0, row, sl, sl] = hds[0, row, sl, sl] + origin * s_ao[i]
+            hds[:, row, sl, sl] = hds[:, row, sl, sl] + origin * s_ao[i]
     out["k/H"][:] = hnew
     out["k/S"][:] = s_k
 

@@ -10,6 +10,7 @@ from scipy.linalg import block_diag
 from scipy.spatial import ConvexHull, Voronoi
 
 from .calibrate import metric_factors, ordinary_geometry, write_ordinary
+from .filtering import bound_hubbard_spectrum
 from .model import adjoint, bloch, mesh_indices, spin_rotation
 from .pipeline import output_file, paths_collide
 
@@ -231,7 +232,7 @@ def complete_subspace(
     raise ValueError("Localized PAW complement did not converge in 500 iterations")
 
 
-def locality_model(model, overlap_file, output, band_range, energy_window, *, pbe_model=None, retained_policy=None):
+def locality_model(model, overlap_file, output, band_range, energy_window, *, pbe_model=None, retained_policy=None, hubbard_recipe=None):
     """Write the constrained Hamiltonian in the same fixed ordinary AO basis."""
     if paths_collide(output, (model, overlap_file)):
         raise ValueError("Choose a separate localized-model destination")
@@ -309,6 +310,9 @@ def locality_model(model, overlap_file, output, band_range, energy_window, *, pb
                 counts,
                 protected,
             )
+            if hubbard_recipe is not None:
+                h = bound_hubbard_spectrum(h, hubbard_recipe)
+                out.attrs["hubbard_recipe"] = json.dumps(hubbard_recipe)
             write_ordinary(
                 out,
                 src,

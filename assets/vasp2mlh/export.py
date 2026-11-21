@@ -161,29 +161,30 @@ def hamgnn_layout(shells, nao=None, *, extend=False):
     matches = []
     for size in templates if nao is None else (nao,):
         layout = {}
-        cost = 0
+        removed = added = 0
         for sym, source in shells.items():
             mask = templates[size].get(atomic_numbers[sym])
             if mask is None:
                 break
             expected = mask_shells(size, mask)
             if expected != source:
-                if not extend or any(
-                    expected.count(l) < source.count(l) for l in set(source)
-                ):
+                if not extend or not set(source).issubset(expected):
                     break
-                cost += sum(2 * l + 1 for l in expected) - sum(
-                    2 * l + 1 for l in source
-                )
+                # New registries use the supported mask retaining the most AO
+                # components. An explicit or previously frozen layout stays exact.
+                for l in set(expected) | set(source):
+                    delta = (expected.count(l) - source.count(l)) * (2 * l + 1)
+                    removed += max(0, -delta)
+                    added += max(0, delta)
             layout[sym] = expected
         else:
-            matches.append((cost, size, layout))
+            matches.append((removed, added, size, layout))
     if not matches:
         raise ValueError(
             f"No compatible HamGNN orbital mask for {shells} with nao_max={nao or 'auto'}. "
             "Use a compatible frozen registry, or generate one with v2h_genbasis and format='hamgnn'."
         )
-    _, size, layout = min(matches, key=lambda item: item[:2])
+    _, _, size, layout = min(matches, key=lambda item: item[:3])
     return size, layout
 
 
@@ -198,13 +199,9 @@ def ham_graph(f, nao):
         au2ev,
     )
 
-    spinor = bool(f.attrs["spinor"])
-    if f.attrs["spin_channels"] != 1:
-        raise ValueError(
-            "Collinear magnetic labels require a spin-conditioned HamGNN configuration; use DeepH for ISPIN=2"
-        )
-    if spinor and not np.allclose(f.attrs["saxis"], [0, 0, 1]):
-        raise ValueError("HamGNN spinor labels require default SAXIS")
+    spinful = bool(f.attrs["spinor"] or f.attrs["spin_channels"] == 2)
+    if spinful and not np.allclose(f.attrs["saxis"], [0, 0, 1]):
+        raise ValueError("HamGNN spin export requires default SAXIS")
     masks = {14: basis_def_14, 19: basis_def_19, 26: basis_def_26}[nao]
     atoms = structure(f)
     ls = json.loads(f.attrs["shells"])
@@ -243,9 +240,11 @@ def ham_graph(f, nao):
     onsite = {}
     edges, h_off, s_off = [], [], []
     for (a, b, c, i, j), h, s in blocks(f):
-        if not spinor:
+        if not spinful:
             h = real_matrix(h, 1e-5, "HamGNN H (eV)")
-        hh = padded(h / au2ev, i, j, 2 if spinor else 1)
+        else:
+            h = np.asarray(h, dtype=complex)
+        hh = padded(h / au2ev, i, j, 2 if spinful else 1)
         ss = padded(real_matrix(s, 1e-7, "HamGNN overlap"), i, j)
         if i == j and (a, b, c) == (0, 0, 0):
             onsite[i] = hh, ss
@@ -280,7 +279,7 @@ def ham_graph(f, nao):
         Hon0=torch.zeros_like(h.real[:n]),
         Hoff0=torch.zeros_like(h.real[n:]),
     )
-    if spinor:
+    if spinful:
         graph.iHon, graph.iHoff = h.imag[:n], h.imag[n:]
         graph.iHon0, graph.iHoff0 = (
             torch.zeros_like(graph.iHon),

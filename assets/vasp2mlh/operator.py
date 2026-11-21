@@ -8,7 +8,7 @@ from scipy import fft
 from scipy.linalg import block_diag
 
 from .model import adjoint
-from .vasp import HSQDTM, metadata
+from .vasp import HSQDTM, metadata, check_hubbard, is_hubbard
 
 
 def check_potential_records(f):
@@ -30,17 +30,20 @@ def check_potential_source(source, other):
     def value(name):
         return params.get(name, "")
 
+    if is_hubbard(source):
+        check_hubbard(source)
+        check_hubbard(other)
+    allowed_spins = (1, 2) if is_hubbard(source) else (1,)
     if (
         source["spinor"]
-        or source["nspin"] != 1
+        or source["nspin"] not in allowed_spins
         or other["spinor"]
-        or other["nspin"] != 1
+        or other["nspin"] != source["nspin"]
         or source["soc"]
         or other["soc"]
         or other["lreal"] not in ("F", ".FALSE.")
         or value("LHFCALC") == "T"
         or value("METAGGA") not in ("", "--", "F", "NONE")
-        or value("LDAU") == "T"
     ):
         raise ValueError(
             "Direct operator currently supports scalar nonmagnetic semilocal LDA/GGA"
@@ -92,13 +95,23 @@ class ScalarOperator:
             fine = f["results/potential/total"]
             if (
                 fine.ndim != 4
-                or fine.shape[0] != 1
+                or fine.shape[0] != source["nspin"]
                 or any(n < m for n, m in zip(fine.shape[1:][::-1], self.shape))
             ):
                 raise ValueError("Invalid scalar total potential grid")
-            fine_k = fft.fftn(fine[0].T, norm="forward")
             idx = [np.rint(fft.fftfreq(n) * n).astype(int) for n in self.shape]
-            self.potential = fft.ifftn(fine_k[np.ix_(*idx)], norm="forward").real
+
+            def soft(component):
+                fine_k = fft.fftn(component.T, norm="forward")
+                return fft.ifftn(fine_k[np.ix_(*idx)], norm="forward").real
+
+            scalar = soft(fine[0])
+            if source["nspin"] == 2:
+                magnetic = soft(fine[1])
+                self.local_channels = [scalar + magnetic, scalar - magnetic]
+            else:
+                self.local_channels = [scalar]
+            self.potential = self.local_channels[0]
             paw = f["results/paw"]
             species = list(dict.fromkeys(ions.get_chemical_symbols()))
             for i, s in enumerate(species):
@@ -110,26 +123,36 @@ class ScalarOperator:
                 raw = paw[key][:]
                 if (
                     raw.ndim != 5
-                    or raw.shape[:2] != (1, len(atoms))
+                    or raw.shape[:2] != (source["nspin"], len(atoms))
                     or raw.shape[-1] != 2
                 ):
                     raise ValueError("Unsupported VASP PAW strength record")
-                entries = []
-                for i, s in enumerate(atoms.get_chemical_symbols()):
-                    size = sum(2 * l + 1 for l in potentials[s].ls)
-                    v = raw[0, i, :size, :size]
-                    if (
-                        not np.isfinite(v).all()
-                        or np.abs(v[..., 1]).max() > 1e-8
-                        or not np.allclose(v[..., 0], v[..., 0].T, atol=1e-8)
-                    ):
-                        raise ValueError(
-                            "Expected real symmetric scalar on-site strengths"
-                        )
-                    entries.append(v[..., 0])
-                self.blocks[key] = block_diag(*entries)
+                channels = []
+                for channel in range(raw.shape[0]):
+                    entries = []
+                    for i, s in enumerate(atoms.get_chemical_symbols()):
+                        size = sum(2 * l + 1 for l in potentials[s].ls)
+                        v = raw[channel, i, :size, :size]
+                        if (
+                            not np.isfinite(v).all()
+                            or np.abs(v[..., 1]).max() > 1e-8
+                            or not np.allclose(v[..., 0], v[..., 0].T, atol=1e-8)
+                        ):
+                            raise ValueError(
+                                "Expected real symmetric scalar on-site strengths"
+                            )
+                        entries.append(v[..., 0])
+                    channels.append(block_diag(*entries))
+                if key == "qij" and any(
+                    not np.allclose(matrix, channels[0], atol=1e-8, rtol=0)
+                    for matrix in channels
+                ):
+                    raise ValueError("PAW overlap differs between spin channels")
+                self.blocks[key] = channels[0]
+                if key == "dij":
+                    self.dij_channels = channels
 
-    def apply(self, q, k, cell, p, vectors):
+    def apply(self, q, k, cell, p, vectors, spin=0):
         vectors = np.asarray(vectors, dtype=complex)
         g = np.rint(q @ cell.T / (2 * np.pi) - k).astype(int)
         index = tuple((g % self.shape).T)
@@ -137,7 +160,7 @@ class ScalarOperator:
             raise ValueError("Wave basis aliases on the supplied VASP soft grid")
         kinetic = HSQDTM * np.sum(q * q, axis=1)
         hp = kinetic[:, None] * vectors + p @ (
-            self.blocks["dij"] @ (adjoint(p) @ vectors)
+            self.dij_channels[spin] @ (adjoint(p) @ vectors)
         )
         # Transform only a batch of orbitals at a time. FFT conventions cancel in V psi.
         batch = max(1, min(32, 2**21 // int(np.prod(self.shape))))
@@ -146,6 +169,6 @@ class ScalarOperator:
             work = np.zeros((*self.shape, vectors[:, sl].shape[1]), complex)
             work[index] = vectors[:, sl]
             work = fft.ifftn(work, axes=(0, 1, 2), overwrite_x=True)
-            work *= self.potential[..., None]
+            work *= self.local_channels[spin][..., None]
             hp[:, sl] += fft.fftn(work, axes=(0, 1, 2), overwrite_x=True)[index]
         return hp

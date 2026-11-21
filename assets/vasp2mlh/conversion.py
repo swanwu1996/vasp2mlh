@@ -112,4 +112,6 @@ def convert_sample(args):
         bar.update(1)
     if report.get("screened_hybrid_maturity") == "beta":
         print(f"HSE reconstruction: {report['completion_method']} / {report.get('retained_policy', 'global-buffer-1')} (beta)")
+    if report.get("source_functional") == "DFT+U":
+        print(f"DFT+U reconstruction: {report['completion_method']} ({report['hubbard_maturity']})")
     print(f"{args.format} sample: {(output / sample).absolute()}")

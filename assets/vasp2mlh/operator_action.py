@@ -54,7 +54,7 @@ def audit(run, models, energy_window=None, band_range=None):
         not np.isfinite(energy_window).all() or energy_window[0] >= energy_window[1]
     ):
         raise ValueError("Energy window must have finite, increasing bounds")
-    if wave.ns != 1:
+    if wave.ns != ref["nspin"] or wave.ns not in (1, 2):
         raise ValueError("Expected a single scalar or spinor WAVECAR channel")
     spectral = spectral_mode(ref)
     if spectral:
@@ -73,7 +73,7 @@ def audit(run, models, energy_window=None, band_range=None):
                 or not np.isclose(ref["nelect"], f.attrs["nelect"])
                 or bool(f.attrs["spinor"]) != spinor
                 or (spinor and not np.allclose(f.attrs["saxis"], [0, 0, 1]))
-                or f.attrs["spin_channels"] != 1
+                or f.attrs["spin_channels"] != wave.ns
                 or not np.array_equal(a.numbers, ref["atoms"].numbers)
                 or not np.allclose(
                     a.positions, ref["atoms"].positions, rtol=0, atol=1e-7
@@ -112,65 +112,66 @@ def audit(run, models, energy_window=None, band_range=None):
             within = []
             projected_norms, leakage_norms = [], []
             weights = []
-            scored_points = 0
+            scored_points = set()
             window = (
                 None
                 if energy_window is None
                 else np.asarray(energy_window) + f.attrs["fermi_eV"]
             )
-            for i, point in enumerate(indices):
-                k, e, c = wave.read(0, records[point])
-                if not np.allclose(
-                    k, samples["kpoints"][point], atol=1e-7, rtol=0
-                ) or not np.allclose(
-                    e[:, 0], samples["eig"][0, point], atol=1e-4, rtol=0
-                ):
-                    raise ValueError(
-                        "Independent eigenpairs differ between XML and WAVECAR"
+            for channel in range(wave.ns):
+                for i, point in enumerate(indices):
+                    k, e, c = wave.read(channel, records[point])
+                    if not np.allclose(
+                        k, samples["kpoints"][point], atol=1e-7, rtol=0
+                    ) or not np.allclose(
+                        e[:, 0], samples["eig"][channel, point], atol=1e-4, rtol=0
+                    ):
+                        raise ValueError(
+                            "Independent eigenpairs differ between XML and WAVECAR"
+                        )
+                    ordinary = block_diag(s[i], s[i]) if spinor else s[i]
+                    levels = eigvalsh(h[channel, i], ordinary)
+                    mask = window_mask(e[:, 0][None], levels[None], band_range, window)
+                    selected = np.flatnonzero(mask[0])
+                    if not len(selected):
+                        continue
+                    scored_points.add(i)
+                    phi, p, d = ao_and_metric(
+                        plane_waves(k, wave.cell, wave.encut),
+                        ref["atoms"],
+                        basis,
+                        pots,
+                        ref["spline"],
                     )
-                ordinary = block_diag(s[i], s[i]) if spinor else s[i]
-                levels = eigvalsh(h[0, i], ordinary)
-                mask = window_mask(e[:, 0][None], levels[None], band_range, window)
-                selected = np.flatnonzero(mask[0])
-                if not len(selected):
-                    continue
-                scored_points += 1
-                phi, p, d = ao_and_metric(
-                    plane_waves(k, wave.cell, wave.encut),
-                    ref["atoms"],
-                    basis,
-                    pots,
-                    ref["spline"],
-                )
-                sp = phi + p @ (d @ (adjoint(p) @ phi))
-                _, ip = metric_factors(adjoint(phi) @ sp)
-                components = np.split(c[:, selected], 2 if spinor else 1)
-                v = np.vstack([ip @ (adjoint(sp) @ part) for part in components])
-                if spinor:
-                    v = (spin_rotation(ref["saxis"]) @ v.reshape(2, -1)).reshape(
-                        v.shape
-                    )
-                # Closest orthonormal frame to the selected projected reference columns.
-                left, singular, right = np.linalg.svd(v, full_matrices=False)
-                if singular[-1] < 1e-6:
-                    raise ValueError("Independent projected edge is rank deficient")
-                weights.append(float(singular[-1] ** 2))
-                q = left @ right
-                _, ia = metric_factors(s[i])
-                if spinor:
-                    ia = block_diag(ia, ia)
-                delta = ia @ h[0, i] @ ia @ q - q * e[selected, 0]
-                residual.extend(np.linalg.norm(delta, axis=0))
-                projected = adjoint(q) @ delta
-                within.append(np.linalg.norm(projected, ord=2))
-                projected_norms.extend(np.linalg.norm(projected, axis=0))
-                leakage_norms.extend(np.linalg.norm(delta - q @ projected, axis=0))
+                    sp = phi + p @ (d @ (adjoint(p) @ phi))
+                    _, ip = metric_factors(adjoint(phi) @ sp)
+                    components = np.split(c[:, selected], 2 if spinor else 1)
+                    v = np.vstack([ip @ (adjoint(sp) @ part) for part in components])
+                    if spinor:
+                        v = (spin_rotation(ref["saxis"]) @ v.reshape(2, -1)).reshape(
+                            v.shape
+                        )
+                    # Closest orthonormal frame to the selected projected reference columns.
+                    left, singular, right = np.linalg.svd(v, full_matrices=False)
+                    if singular[-1] < 1e-6:
+                        raise ValueError("Independent projected edge is rank deficient")
+                    weights.append(float(singular[-1] ** 2))
+                    q = left @ right
+                    _, ia = metric_factors(s[i])
+                    if spinor:
+                        ia = block_diag(ia, ia)
+                    delta = ia @ h[channel, i] @ ia @ q - q * e[selected, 0]
+                    residual.extend(np.linalg.norm(delta, axis=0))
+                    projected = adjoint(q) @ delta
+                    within.append(np.linalg.norm(projected, ord=2))
+                    projected_norms.extend(np.linalg.norm(projected, axis=0))
+                    leakage_norms.extend(np.linalg.norm(delta - q @ projected, axis=0))
             if not residual:
                 raise ActionUnavailable(
                     "No independently sampled states enter the requested window"
                 )
             results[str(name)] = {
-                "kpoints_scored": scored_points,
+                "kpoints_scored": len(scored_points),
                 "kpoints_total": len(records),
                 "independent_k": len(indices),
                 "states_scored": len(residual),
@@ -191,3 +192,22 @@ def audit(run, models, energy_window=None, band_range=None):
                 "max_window_operator_norm_eV": float(max(within)),
             }
     return results
+
+
+def independent_action(src, run, reference, model_path, window, band_range):
+    """Measure the same independent PAW action for single and batch validation."""
+    spectral = spectral_mode(src)
+    if spectral and "zero_weight" not in src:
+        return {
+            "status": "unavailable",
+            "reason": "No independent zero-weight WAVECAR records in the source SCF",
+        }
+    action_run = run if spectral else reference
+    wave = action_run / "WAVECAR"
+    if not wave.is_file() or not wave.stat().st_size:
+        return {"status": "unavailable", "reason": "No independent WAVECAR"}
+    try:
+        result = audit(action_run, [model_path], window, band_range)
+    except ActionUnavailable as exc:
+        return {"status": "unavailable", "reason": str(exc)}
+    return {"status": "measured", "wavecar_sha256": file_sha256(wave), **result[str(model_path)]}

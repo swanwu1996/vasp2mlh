@@ -151,6 +151,29 @@ class DeliveryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "subspace_bands"):
             audit([self.model, other], self.lock, labels=True)
 
+    def test_hubbard_dataset_checks_element_and_missing_identity(self):
+        other = self.root / "other.h5"
+        settings = dict(
+            GGA="PE",
+            LDAU="T",
+            LDAUTYPE=2,
+            HUBBARD_BY_ELEMENT={"H": {"LDAUL": 0, "LDAUU": 2.0, "LDAUJ": 0.0}},
+        )
+        with h5py.File(self.model, "r+") as f:
+            f.attrs["xc_settings"] = json.dumps(settings)
+        shutil.copyfile(self.model, other)
+        audit([self.model, other], self.lock, labels=True)
+        settings["HUBBARD_BY_ELEMENT"]["H"]["LDAUU"] = 1.0
+        with h5py.File(other, "r+") as f:
+            f.attrs["xc_settings"] = json.dumps(settings)
+        with self.assertRaisesRegex(ValueError, "Hubbard"):
+            audit([self.model, other], self.lock, labels=True)
+        settings.pop("HUBBARD_BY_ELEMENT")
+        with h5py.File(other, "r+") as f:
+            f.attrs["xc_settings"] = json.dumps(settings)
+        with self.assertRaisesRegex(ValueError, "provenance"):
+            audit([other], self.lock, labels=True)
+
     def test_deeph_readback_checks_units_order_and_missing_files(self):
         folder = self.root / "deeph/0"
         deeph(self.model, folder, self.lock)

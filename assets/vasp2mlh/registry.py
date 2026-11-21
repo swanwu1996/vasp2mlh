@@ -234,12 +234,35 @@ def label_definition(f):
     if method in {"hybrid_spectral_ritz", "spinor_spectral_ritz"}:
         settings.pop("complement_eV")
         settings["complement_policy"] = attrs["complement_policy"]
-    if method in {"filtered_paw_ritz", "hybrid_spectral_ritz", "spinor_spectral_ritz"}:
+    if method in {"hubbard-paw-ritz-v1", "filtered_paw_ritz", "hybrid_spectral_ritz", "spinor_spectral_ritz"}:
         for key in ("filter_width_eV", "filter_floor", "filter_taper_eV"):
             settings[key] = float(attrs[key])
         settings["centre_offset_eV"] = round(
             float(attrs["filter_centre_eV"] - attrs["fermi_eV"]), 10
         )
+    if "hubbard_recipe" in attrs or method == "hubbard-paw-ritz-v1":
+        recipe = json.loads(attrs["hubbard_recipe"])
+        limit = recipe.pop("linear_through_eV")
+        target = recipe["energy_window_from_fermi_eV"]
+        upper = (
+            attrs["fermi_eV"] + target[1]
+            if target is not None
+            else np.max(f["k/eigenvalues"][:, :, recipe["band_range_1based"][1] - 1])
+        )
+        # XML levels may be rounded to four decimals. k/eigenvalues
+        # contains the corresponding WAVECAR double precision values.
+        tol = 1e-4 if target is None else 1e-7
+        if not np.isclose(limit, upper + recipe["upper_buffer_eV"], atol=tol, rtol=0):
+            raise ValueError("Inconsistent DFT+U spectral bound")
+        if recipe.get("filter_centre_policy") == "max-fermi-plus-6-or-target-plus-2":
+            if not np.isclose(
+                settings.pop("centre_offset_eV"),
+                max(6.0, limit - attrs["fermi_eV"]),
+                atol=1e-7,
+                rtol=0,
+            ):
+                raise ValueError("DFT+U filter centre disagrees with its target window")
+        settings["hubbard_recipe"] = recipe
     if attrs["format"] == SPARSE_FORMAT:
         report = json.loads(attrs["truncation_report"])
         for key in ("cutoff_A", "h_tol_eV", "s_tol", "relative_pruning"):
@@ -265,6 +288,7 @@ def audit(models, registry=None, labels=False):
     known = {}
     known_paw = {}
     known_xc = set()
+    known_hubbard = {}
     reports = []
     first_definition = None
     for path in models:
@@ -311,6 +335,24 @@ def audit(models, registry=None, labels=False):
                     )
                 if xc.get("GGA") in ("LI", "LIBXC") and not xc.get("LIBXC1"):
                     raise ValueError(f"Missing Libxc functional identity in {path}")
+                if xc.get("LDAU") in ("T", "TRUE", ".TRUE."):
+                    sites = xc.pop("HUBBARD_BY_ELEMENT", {})
+                    if (
+                        xc.get("LDAUTYPE") not in (1, 2, 4)
+                        or not isinstance(sites, dict)
+                        or set(sites) != set(paw)
+                    ):
+                        raise ValueError(f"Incomplete DFT+U provenance in {path}")
+                    for symbol, values in sites.items():
+                        if (
+                            not isinstance(values, dict)
+                            or set(values) != {"LDAUL", "LDAUU", "LDAUJ"}
+                            or type(values["LDAUL"]) is not int
+                            or not np.isfinite([values["LDAUU"], values["LDAUJ"]]).all()
+                        ):
+                            raise ValueError(f"Invalid DFT+U definition for {symbol}")
+                        if known_hubbard.setdefault(symbol, values) != values:
+                            raise ValueError(f"Different Hubbard shell, U or J for {symbol}")
                 known_xc.add(json.dumps(xc, sort_keys=True))
                 if len(known_xc) > 1:
                     raise ValueError(

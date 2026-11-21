@@ -16,6 +16,23 @@ from vasp2mlh.band_release import (
 
 
 class ScalarBandReleaseTests(unittest.TestCase):
+    def test_independent_failure_in_one_spin_channel(self):
+        points = np.array([[0.1, 0.2, 0.3]])
+        native = np.array([[[-1.0, 1.0]], [[-1.0, 1.0]]])
+        levels = native.copy()
+        levels[1] += 0.013
+        with patch("vasp2mlh.band_release.bands", return_value=levels):
+            with self.assertRaisesRegex(ValueError, "Independent"):
+                score_window(
+                    None, points, native, (1, 2), None, 0.010, 0.050, independent=True
+                )
+            score, rows = score_window(
+                None, points, native, (1, 2), None, 1.0, 1.0, independent=True
+            )
+        self.assertLess(score["rmse_eV"], 0.010)
+        self.assertAlmostEqual(score["worst_channel_rmse_eV"], 0.013)
+        self.assertEqual(rows["spin_1based"].tolist(), [1, 1, 2, 2])
+
     def test_convergence_on_last_allowed_iteration(self):
         with TemporaryDirectory() as d:
             p = Path(d)

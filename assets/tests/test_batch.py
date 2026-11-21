@@ -207,7 +207,7 @@ class BatchTests(unittest.TestCase):
     def test_validated_defaults_to_reference_and_fermi_window(self):
         self.config["mode"] = "validated"
         defaults = self.write()[0]["options"]
-        self.assertEqual(defaults["cutoff"], 12.0)
+        self.assertNotIn("cutoff", defaults)  # resolved after functional identification
         self.assertEqual(defaults["max_rmse"], .01)
         self.config["defaults"] = {
             "band_range": [1, 2],

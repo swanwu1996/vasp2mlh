@@ -96,7 +96,7 @@ def make_parser():
         help="eV relative to the source Fermi level (default: -1 to +2)",
     )
     single.add_argument(
-        "--cutoff", type=float, default=12.0, help="H cutoff in angstrom (default: 12)"
+        "--cutoff", type=float, help="H cutoff in angstrom (DFT+U: 18, otherwise 12)"
     )
     single.add_argument(
         "--max-rmse",
@@ -198,13 +198,13 @@ def make_parser():
             "--completion-method",
             choices=("auto", "spectral-ritz", "locality-constrained", "pbe-anchored-v1"),
             default=None,
-            help="automatic from VASP XML: scalar HSE uses pbe-anchored-v1 (beta); other supported hybrids and noncollinear sources default to locality-constrained",
+            help="automatic from VASP XML: scalar HSE uses pbe-anchored-v1 (beta); scalar/collinear DFT+U reads the full PAW strengths; other supported hybrids and noncollinear sources default to locality-constrained",
         )
         operation.add_argument(
             "--centre-offset",
             type=float,
-            default=6.0,
-            help="filter centre above the source Fermi energy in eV (default 6)",
+            default=None,
+            help="filter centre above source Fermi in eV (default 6; direct DFT+U also covers the target plus 2 eV)",
         )
         operation.add_argument(
             "--width", type=float, default=1.0, help="filter width in eV (default 1)"

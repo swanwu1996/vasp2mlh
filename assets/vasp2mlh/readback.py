@@ -204,10 +204,10 @@ def hamgnn_blocks(path, model, info, nao, *, graph=None):
     )
     keys = [(0, 0, 0, i, i) for i in range(n)] + indices
     require(len(set(keys)) == len(keys), "Duplicate HamGNN edges")
-    spinor = bool(model.attrs["spinor"])
-    hd = nao * (2 if spinor else 1)
+    spinful = bool(model.attrs["spinor"] or model.attrs["spin_channels"] == 2)
+    hd = nao * (2 if spinful else 1)
     s = np.asarray(g.overlap)
-    if spinor:
+    if spinful:
         on = np.asarray(g.Hon) + 1j * np.asarray(g.iHon)
         off = np.asarray(g.Hoff) + 1j * np.asarray(g.iHoff)
         require(
@@ -217,7 +217,7 @@ def hamgnn_blocks(path, model, info, nao, *, graph=None):
             and g.iHoff0.shape == g.iHoff.shape
             and not np.any(np.asarray(g.iHon0))
             and not np.any(np.asarray(g.iHoff0)),
-            "Invalid HamGNN spinor components",
+            "Invalid HamGNN spinful components",
         )
         h = np.concatenate((on, off))
     else:
@@ -241,7 +241,7 @@ def hamgnn_blocks(path, model, info, nao, *, graph=None):
         "Invalid HamGNN reference Hamiltonian tensors",
     )
     result = {}
-    spin_slots = [np.r_[a, a + nao] for a in slots] if spinor else slots
+    spin_slots = [np.r_[a, a + nao] for a in slots] if spinful else slots
     for key, hh, ss in zip(keys, h, s):
         i, j = key[-2:]
         active = np.ix_(slots[i], slots[j])
@@ -253,7 +253,7 @@ def hamgnn_blocks(path, model, info, nao, *, graph=None):
             "Nonzero padded HamGNN orbitals",
         )
         result[key] = (
-            hblock.astype(np.complex128 if spinor else float) * au2ev,
+            hblock.astype(np.complex128 if spinful else float) * au2ev,
             sblock,
         )
     return result
