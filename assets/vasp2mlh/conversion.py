@@ -62,6 +62,7 @@ def convert_sample(args):
             None,
             model,
             potential_run=potential,
+            pbe_run=args.pbe_run,
             mesh=args.mesh,
             band_range=args.band_range,
             energy_window=window,
@@ -89,5 +90,5 @@ def convert_sample(args):
         result.rename(output)
         bar.update(1)
     if report.get("screened_hybrid_maturity") == "beta":
-        print("Screened hybrid reconstruction (including HSE): beta")
+        print(f"HSE reconstruction: {report.get('completion_method', 'screened hybrid')} (beta)")
     print(f"{args.format} sample: {(output / sample).absolute()}")

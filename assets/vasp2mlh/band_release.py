@@ -11,12 +11,12 @@ from ase.io import write
 from . import __version__
 from .comparison import periodic_match
 from .filtering import filter_model
-from .locality import locality_model, PRIOR_OFFSET_EV
+from .locality import locality_model, PBE_ANCHORED, PRIOR_OFFSET_EV
 from .overlap import overlap
-from .pipeline import bands, build, file_sha256, output_file
+from .pipeline import bands, build, file_sha256, output_file, projection_header
 from .registry import fingerprint, inspect_basis, read_registry
 from .sparse import sparsify
-from .vasp import is_hybrid, spectral_mode, metadata, screened_hybrid_maturity
+from .vasp import is_hybrid, spectral_mode, metadata, screened_hybrid_maturity, split_mesh
 
 
 def check_scalar(meta):
@@ -260,6 +260,137 @@ def check_source(src, run):
         raise ValueError("Source must use ICHARG=11 or write its converged SCF density")
 
 
+def resolve_pbe_run(src, run, pbe_run, method):
+    """Route from the effective VASP parameters, never from a folder name."""
+    screened = bool(screened_hybrid_maturity(src))
+    if not screened:
+        if pbe_run is not None or method == PBE_ANCHORED:
+            raise ValueError(
+                "pbe_run and pbe-anchored-v1 require a scalar screened PBE hybrid source"
+            )
+        return None
+    if src["spinor"] or src["soc"]:
+        raise ValueError(
+            "The HSE beta method requires a scalar source; hybrid spinors are unsupported"
+        )
+    if method not in (None, PBE_ANCHORED):
+        raise ValueError(
+            "Legacy HSE completion retired. Omit completion_method or use pbe-anchored-v1"
+        )
+    directory = Path(pbe_run) if pbe_run is not None else run / "pbe"
+    if not (directory / "vasprun.xml").is_file():
+        raise ValueError(
+            f"HSE requires a matching dense PBE calculation at {directory}; set pbe_run in mlh.toml"
+        )
+    return directory
+
+
+def check_pbe_exchange(meta, directory, *, screened):
+    settings = meta["operator_parameters"]
+    gga = settings.get("GGA", "--")
+    if gga in ("--", ""):
+        with (directory / "POTCAR").open(errors="replace") as stream:
+            codes = {
+                line.split("=", 1)[1].split()[0].upper()
+                for line in stream
+                if line.lstrip().startswith("LEXCH") and "=" in line
+            }
+        pbe = codes == {"PE"}
+    else:
+        pbe = gga == "PE"
+    fraction = float(settings.get("AEXX", 0))
+    exchange = 1 - fraction if screened else 1.0
+    switches = ("LRHFCALC", "LTHOMAS", "LMODELHF", "LHFONE")
+    if (
+        not pbe
+        or any(
+            settings.get(tag, "F") not in ("F", "FALSE", ".FALSE.") for tag in switches
+        )
+        or float(settings.get("EXXOEP", 0)) != 0
+        or float(settings.get("AEXX_LR", 0)) != 0
+        or (not screened and fraction != 0)
+        or any(
+            not np.isclose(
+                float(settings.get(tag, expected)), expected, atol=1e-7, rtol=0
+            )
+            for tag, expected in (
+                ("ALDAX", exchange),
+                ("AGGAX", exchange),
+                ("ALDAC", 1.0),
+                ("AGGAC", 1.0),
+            )
+        )
+    ):
+        raise ValueError(
+            "Expected PBE-based screened exchange for HSE and unmodified PBE for pbe_run"
+        )
+
+
+def check_pbe_pair(src, run, directory, mesh=None):
+    pbe = metadata(directory / "vasprun.xml")
+    if is_hybrid(pbe):
+        raise ValueError(
+            "pbe_run contains a hybrid calculation (LHFCALC=T); supply semilocal PBE"
+        )
+    check_scalar(pbe)
+    if pbe["icharg"] not in (0, 1, 2):
+        raise ValueError("pbe_run requires a self-consistent scalar PBE calculation")
+    check_convergence(pbe, directory)
+    check_pbe_exchange(src, run, screened=True)
+    check_pbe_exchange(pbe, directory, screened=False)
+    a, b = src["atoms"], pbe["atoms"]
+    if (
+        not np.array_equal(a.numbers, b.numbers)
+        or not np.allclose(a.cell, b.cell, atol=1e-7, rtol=0)
+        or not np.allclose(
+            a.get_scaled_positions(wrap=False),
+            b.get_scaled_positions(wrap=False),
+            atol=1e-7,
+            rtol=0,
+        )
+        or src["titles"] != pbe["titles"]
+        or src["spline"] != pbe["spline"]
+        or not np.allclose(
+            [src["nelect"], src["encut"]],
+            [pbe["nelect"], pbe["encut"]],
+            atol=1e-7,
+            rtol=0,
+        )
+        or any(
+            src["operator_parameters"].get(tag) != pbe["operator_parameters"].get(tag)
+            for tag in (
+                "LASPH",
+                "GGA_COMPAT",
+                "VOSKOWN",
+                "LDIPOL",
+                "IDIPOL",
+                "EFIELD",
+                "PARAM1",
+                "PARAM2",
+            )
+        )
+        or file_sha256(run / "POTCAR") != file_sha256(directory / "POTCAR")
+    ):
+        raise ValueError(
+            "HSE and PBE geometry, PAW datasets or electronic settings differ"
+        )
+    split_mesh(pbe, None)
+    _, dense = projection_header(directory, pbe, None)
+    coarse = np.asarray(mesh if mesh is not None else src["mesh"])
+    if np.any(dense < coarse) or not np.any(dense > coarse):
+        raise ValueError(
+            "pbe_run requires a finer full mesh, at least as dense along every reciprocal axis"
+        )
+    return pbe
+
+
+def pbe_input_hashes(directory):
+    return {
+        name: file_sha256(directory / name)
+        for name in ("vasprun.xml", "POTCAR", "WAVECAR")
+    }
+
+
 def reconstruct(
     run,
     registry,
@@ -273,6 +404,7 @@ def reconstruct(
     energy_window=None,
     mesh=None,
     potential_run=None,
+    pbe_run=None,
     relative_pruning=False,
     completion_method=None,
     centre_offset=6.0,
@@ -303,7 +435,8 @@ def reconstruct(
     reference = Path(reference) if reference is not None else None
     potential = Path(potential_run) if potential_run else run
     inputs = {registry.resolve()}
-    for directory in {run, potential, reference} - {None}:
+    candidate_pbe = Path(pbe_run) if pbe_run is not None else run / "pbe"
+    for directory in {run, potential, reference, candidate_pbe} - {None}:
         inputs.update(
             (directory / n).resolve()
             for n in (
@@ -321,14 +454,16 @@ def reconstruct(
         )
     if output.resolve() in inputs:
         raise ValueError("Model output collides with an input")
+    xml_hash = file_sha256(run / "vasprun.xml")
     src = metadata(run / "vasprun.xml")
     check_source(src, run)
+    pbe_dir = resolve_pbe_run(src, run, pbe_run, completion_method)
     mode = spectral_mode(src)
     if mode and potential.resolve() != run.resolve():
         raise ValueError(
             "Spectral projection uses the source WAVECAR; omit potential_run"
         )
-    if completion_method not in (None, "spectral-ritz", "locality-constrained"):
+    if completion_method not in (None, PBE_ANCHORED, "spectral-ritz", "locality-constrained"):
         raise ValueError(f"Unknown hybrid method {completion_method}")
     localized = mode is not None and completion_method != "spectral-ritz"
     if completion_method is not None and mode is None:
@@ -341,7 +476,9 @@ def reconstruct(
         raise ValueError("Set completion_method='spectral-ritz' to use Ritz filter controls")
     if floor is None:
         floor = 0.0001 if mode else 0.005
-    xml_hash = file_sha256(run / "vasprun.xml")
+    if pbe_dir is not None:
+        pbe_hashes = pbe_input_hashes(pbe_dir)
+        pbe = check_pbe_pair(src, run, pbe_dir, mesh)
     inputs_for_hash = ("POTCAR", "WAVECAR") if mode else ("POTCAR", "CHGCAR")
     hashes = {name: file_sha256(run / name) for name in inputs_for_hash}
     if reference is not None:
@@ -407,7 +544,32 @@ def reconstruct(
             on_stage("Compute AO overlap")
         overlap(d / "geometry.vasp", registry, d / "overlap.h5", order=96)
         if on_stage is not None:
-            on_stage("Filter Hamiltonian")
+            on_stage(
+                "Project PBE reference and complete HSE"
+                if pbe_dir is not None
+                else "Filter Hamiltonian"
+            )
+        pbe_model = None
+        if pbe_dir is not None:
+            pbe_model = d / "pbe-locality.h5"
+            build(
+                pbe_dir,
+                registry,
+                d / "pbe-projection.h5",
+                integration_only=True,
+                complement=pbe["efermi"] + PRIOR_OFFSET_EV,
+                on_kpoint=on_kpoint,
+            )
+            try:
+                locality_model(
+                    d / "pbe-projection.h5",
+                    d / "overlap.h5",
+                    pbe_model,
+                    band_range,
+                    energy_window,
+                )
+            except ValueError as exc:
+                raise ValueError(f"PBE reference completion failed: {exc}") from exc
         if localized:
             locality_model(
                 d / "direct.h5",
@@ -415,6 +577,7 @@ def reconstruct(
                 d / "filtered.h5",
                 band_range,
                 energy_window,
+                pbe_model=pbe_model,
             )
         else:
             filter_model(
@@ -450,6 +613,8 @@ def reconstruct(
                 raise ValueError(
                     "Source electronic inputs changed during reconstruction"
                 )
+            if pbe_dir is not None and pbe_input_hashes(pbe_dir) != pbe_hashes:
+                raise ValueError("PBE reference inputs changed during reconstruction")
             basis = inspect_basis(model, expected)
             if on_stage is not None:
                 on_stage("Validate source mesh")
@@ -504,6 +669,14 @@ def reconstruct(
                 },
                 input_sha256=hashes,
             )
+            report["source_functional"] = (
+                "HSE"
+                if pbe_dir is not None
+                else "hybrid"
+                if is_hybrid(src)
+                else "semilocal"
+            )
+            report["completion_method"] = str(model.attrs["hamiltonian_method"])
             report.update(screened_hybrid_maturity(src))
             if localized:
                 del report["filter_parameters"]
@@ -525,6 +698,17 @@ def reconstruct(
                         model["filter/min_edge_weight"][:].min()
                     ),
                 }
+            if pbe_dir is not None:
+                report.update(
+                    profile="hse-pbe-anchored/1",
+                    completion_method=PBE_ANCHORED,
+                    pbe_reference=dict(
+                        input_sha256=pbe_hashes,
+                        mesh=list(pbe["mesh"]),
+                        operator_settings=pbe["operator_parameters"],
+                        alignment_eV=float(model.attrs["pbe_alignment_eV"]),
+                    ),
+                )
             if reference is None:
                 group = model.create_group("source_validation")
             else:

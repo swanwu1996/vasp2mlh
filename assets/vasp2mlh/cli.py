@@ -189,11 +189,12 @@ def make_parser():
         help="dimensions for explicitly listed uniform source points",
     )
     for operation in (single, release):
+        operation.add_argument("--pbe-run", help="denser matching PBE SCF directory for scalar HSE (default: RUN/pbe)")
         operation.add_argument(
             "--completion-method",
-            choices=("spectral-ritz", "locality-constrained"),
+            choices=("spectral-ritz", "locality-constrained", "pbe-anchored-v1"),
             default=None,
-            help="completion of the hybrid or noncollinear Hamiltonian (screened hybrids including HSE: beta; default: locality-constrained)",
+            help="automatic from VASP XML: scalar HSE uses pbe-anchored-v1 (beta); other supported hybrids and noncollinear sources default to locality-constrained",
         )
         operation.add_argument(
             "--centre-offset",

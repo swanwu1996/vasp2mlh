@@ -7,7 +7,7 @@ from .readback import verify_export
 import h5py
 import numpy as np
 
-from .band_release import reference_data, score_window
+from .band_release import reference_data, score_window, pbe_input_hashes, resolve_pbe_run
 from .configuration import DEFAULT_ENERGY_WINDOW
 from .pipeline import file_sha256, output_file, paths_collide
 from .vasp import spectral_mode, metadata, screened_hybrid_maturity
@@ -47,6 +47,20 @@ def validate_sample(args, config):
             maturity = screened_hybrid_maturity(src)
             report.update(maturity)
             provenance.update(maturity)
+            pbe_run = getattr(args, "pbe_run", None)
+            method = getattr(args, "completion_method", None)
+            if "pbe_reference" in provenance:
+                directory = resolve_pbe_run(src, run, pbe_run, method)
+                if (
+                    directory is None
+                    or pbe_input_hashes(directory)
+                    != provenance["pbe_reference"]["input_sha256"]
+                ):
+                    raise ValueError(
+                        "PBE reference inputs differ from the model's recorded PBE source"
+                    )
+            elif pbe_run is not None or method == "pbe-anchored-v1":
+                raise ValueError("This model was not built with the specified PBE anchor")
             if spectral_mode(src) and not args.reference:
                 reference = run
             ref, selected = reference_data(src, reference, provenance["input_sha256"])

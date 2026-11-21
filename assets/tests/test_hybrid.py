@@ -5,10 +5,10 @@ from xml.etree import ElementTree as ET
 
 import numpy as np
 
-from vasp2mlh.band_release import check_convergence, check_hybrid, reference_points
+from vasp2mlh.band_release import check_convergence, check_hybrid, reference_points, resolve_pbe_run, check_pbe_exchange
 from vasp2mlh.filtering import filtered_operator, spectral_baseline
 from vasp2mlh.model import mesh_indices
-from vasp2mlh.vasp import screened_hybrid_maturity, source_fermi, split_mesh, xc_parameters
+from vasp2mlh.vasp import effective_hybrid_flag, screened_hybrid_maturity, source_fermi, split_mesh, xc_parameters
 
 
 class HybridTests(unittest.TestCase):
@@ -21,6 +21,68 @@ class HybridTests(unittest.TestCase):
             )
         for settings in ({}, {**xc, "LHFCALC": "F"}, {**xc, "HFSCREEN": "0"}):
             self.assertEqual(screened_hybrid_maturity(dict(operator_parameters=settings)), {})
+
+    def test_only_resolved_exchange_flag_identifies_source(self):
+        root = ET.fromstring(
+            '<root><incar><i name="LHFCALC">T</i></incar>'
+            '<parameters><i name="LHFCALC">.false.</i></parameters></root>'
+        )
+        params = root.find("parameters")
+        self.assertEqual(effective_hybrid_flag(params), "F")
+        extra = ET.SubElement(params, "i", name="LHFCALC")
+        extra.text = "T"
+        with self.assertRaisesRegex(ValueError, "LHFCALC"):
+            effective_hybrid_flag(params)
+        params.clear()
+        with self.assertRaisesRegex(ValueError, "LHFCALC"):
+            effective_hybrid_flag(params)
+
+    def test_anchor_cannot_override_functional_detection(self):
+        with TemporaryDirectory() as temp:
+            run = Path(temp)
+            (run / "pbe").mkdir()
+            (run / "pbe/vasprun.xml").touch()
+            hse = dict(
+                operator_parameters={"LHFCALC": "T", "HFSCREEN": "0.2"},
+                spinor=False,
+                soc=False,
+            )
+            for flag, screen in (("F", "0.2"), ("T", "0")):
+                other = {
+                    **hse,
+                    "operator_parameters": {"LHFCALC": flag, "HFSCREEN": screen},
+                }
+                self.assertIsNone(resolve_pbe_run(other, run, None, None))
+                with self.assertRaisesRegex(ValueError, "require"):
+                    resolve_pbe_run(other, run, run / "pbe", None)
+            self.assertEqual(resolve_pbe_run(hse, run, None, None), run / "pbe")
+            for legacy in ("locality-constrained", "spectral-ritz"):
+                with self.assertRaisesRegex(ValueError, "retired"):
+                    resolve_pbe_run(hse, run, None, legacy)
+            with self.assertRaisesRegex(ValueError, "spinors"):
+                resolve_pbe_run({**hse, "spinor": True}, run, None, None)
+            with self.assertRaisesRegex(ValueError, "pbe_run"):
+                resolve_pbe_run(hse, run, run / "missing", None)
+
+    def test_pbe_reference_identity(self):
+        with TemporaryDirectory() as temp:
+            run = Path(temp)
+            (run / "POTCAR").write_text(" LEXCH = PE\n LEXCH = PE\n")
+            check_pbe_exchange({"operator_parameters": {}}, run, screened=False)
+            for settings in (
+                {"GGA": "PS"},
+                {"GGA": "CA"},
+                {"GGA": "PE", "AGGAX": "0.75"},
+                {"GGA": "PE", "AEXX": "0.25"},
+                {"GGA": "PE", "LRHFCALC": "T"},
+            ):
+                with self.assertRaisesRegex(ValueError, "PBE"):
+                    check_pbe_exchange(
+                        {"operator_parameters": settings}, run, screened=False
+                    )
+            (run / "POTCAR").write_text(" LEXCH = PE\n LEXCH = CA\n")
+            with self.assertRaises(ValueError):
+                check_pbe_exchange({"operator_parameters":{}},run,screened=False)
 
     def test_exchange_settings_and_scf(self):
         params = dict(LHFCALC="T", AEXX="0.25", HFSCREEN="0.2", HFRCUT="-1", GGA="PE")

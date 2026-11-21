@@ -16,7 +16,7 @@ import h5py
 from threadpoolctl import threadpool_limits
 
 from . import __version__
-from .band_release import check_source, reconstruct, reference_points
+from .band_release import check_source, reconstruct, reference_points, resolve_pbe_run, check_pbe_pair
 from .basis import radial_backend
 from .configuration import (
     BATCH_CONTROLS,
@@ -116,6 +116,8 @@ def read_jobs(manifest, config=None):
         allowed = {"id", "run", "options"}
         if mode in ("validated", "hybrid", "noncollinear"):
             allowed.update(("reference", "potential_run"))
+        if mode == "hybrid":
+            allowed.add("pbe_run")
         options = {**config.get("defaults", {}), **row.get("options", {})}
         if row.keys() - allowed or options.keys() - modes[mode]:
             raise ValueError(f"Unknown field or option for {mode} job {label}")
@@ -142,7 +144,7 @@ def read_jobs(manifest, config=None):
                 ):
                     raise ValueError(f"Invalid {key} array for job {label}")
             elif key == "completion_method":
-                if value not in ("spectral-ritz", "locality-constrained"):
+                if value not in ("spectral-ritz", "locality-constrained", "pbe-anchored-v1"):
                     raise ValueError(f"Unknown hybrid method for job {label}")
             elif key == "relative_pruning":
                 if type(value) is not bool:
@@ -163,6 +165,8 @@ def read_jobs(manifest, config=None):
                 else row["reference"]
             )
             job["potential_run"] = path(row.get("potential_run", row["run"]))
+        if "pbe_run" in row:
+            job["pbe_run"] = path(row["pbe_run"])
         jobs.append(job)
     if not jobs:
         raise ValueError("Manifest has no jobs")
@@ -185,6 +189,16 @@ def input_paths(job):
         )
     elif job["mode"] in ("hybrid", "noncollinear"):
         paths.append(job["reference"] / "vasprun.xml")
+        src = metadata(source / "vasprun.xml")
+        directory = resolve_pbe_run(
+            src, source, job.get("pbe_run"), job["options"].get("completion_method")
+        )
+        if directory is not None:
+            paths.extend(
+                directory / name for name in ("vasprun.xml", "WAVECAR", "POTCAR")
+            )
+            if (directory / "OUTCAR").is_file():
+                paths.append(directory / "OUTCAR")
         if (source / "OUTCAR").is_file():
             paths.append(source / "OUTCAR")
     elif (source / "CHGCAR").is_file() and (source / "CHGCAR").stat().st_size:
@@ -233,7 +247,7 @@ def convert(job, output, threads, backend=None):
             # Keep role assignments even if several directories share the same inputs.
             signature["directories"] = {
                 k: str(job[k])
-                for k in ("run", "reference", "potential_run")
+                for k in ("run", "reference", "potential_run", "pbe_run")
                 if k in job
             }
             key = hashlib.sha256(
@@ -288,6 +302,7 @@ def convert(job, output, threads, backend=None):
                         job["reference"],
                         tmp,
                         potential_run=job["potential_run"],
+                        pbe_run=job.get("pbe_run"),
                         on_kpoint=point_callback,
                         **job["options"],
                     )
@@ -357,6 +372,16 @@ def preflight(job):
     counts = {s: sum(2 * sh.l + 1 for sh in shells) for s, shells in basis.items()}
     dim = sum(counts[s] for s in symbols)
     hdim = dim * (2 if src["spinor"] else 1)
+    projected = len(src["kpoints"]) if spectral_mode(src) else wave.nk
+    largest_mesh = projected
+    if job["mode"] in ("hybrid", "noncollinear"):
+        directory = resolve_pbe_run(
+            src, run, job.get("pbe_run"), job["options"].get("completion_method")
+        )
+        if directory is not None:
+            ref_pbe = check_pbe_pair(src, run, directory, job["options"].get("mesh"))
+            largest_mesh = max(projected, len(ref_pbe["kpoints"]))
+            projected += len(ref_pbe["kpoints"])
     if job["mode"] == "validated":
         potential_meta = (
             src
@@ -369,10 +394,10 @@ def preflight(job):
     if job["mode"] != "projection":
         reference_points(src, job["reference"])
     return {
-        "kpoints": len(src["kpoints"]) if spectral_mode(src) else wave.nk,
+        "kpoints": projected,
         "orbitals": dim,
         "dense_hs_bytes": 16
-        * (len(src["kpoints"]) if spectral_mode(src) else wave.nk)
+        * largest_mesh
         * (wave.ns * hdim**2 + dim**2),
     }
 

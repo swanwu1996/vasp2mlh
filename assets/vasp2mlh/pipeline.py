@@ -22,7 +22,7 @@ from .model import (
     localized_transform,
     bloch,
 )
-from .vasp import Wavecar, plane_waves, metadata, xc_parameters
+from .vasp import Wavecar, plane_waves, metadata, xc_parameters, split_mesh
 
 
 def paths_collide(output, inputs):
@@ -95,11 +95,14 @@ def build(
     potential_run=None,
     *,
     on_kpoint=None,
+    integration_only=False,
 ):
     if not np.isfinite(complement):
         raise ValueError("Complement energy must be finite")
     run = Path(run)
     meta = metadata(run / "vasprun.xml")
+    if integration_only and "wave_indices" not in meta:
+        split_mesh(meta, None)
     w, mesh = projection_header(run, meta, mesh)
     atoms = meta["atoms"]
     xml_e = meta["eig"]

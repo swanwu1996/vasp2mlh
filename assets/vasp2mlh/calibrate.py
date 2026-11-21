@@ -110,7 +110,7 @@ def overlap_mesh_alias(mesh_r, mesh_s, exact_r, exact_s):
     return float(np.sqrt(error_sq / norm_sq))
 
 
-def write_ordinary(out, src, atoms, bounds, r_ao, s_ao, k, s_k, hnew):
+def write_ordinary(out, src, atoms, bounds, r_ao, s_ao, k, s_k, hnew, *, reference=None):
     # S(R) is known beyond the mesh image cell. Carry the energy origin on
     # that exact support so an absolute energy shift gives c*S(k) at every k.
     origin = (
@@ -120,8 +120,12 @@ def write_ordinary(out, src, atoms, bounds, r_ao, s_ao, k, s_k, hnew):
     )
     anchored = hnew.copy()
     dim = s_k.shape[-1]
-    for start in range(0, hnew.shape[-1], dim):
-        anchored[..., start : start + dim, start : start + dim] -= origin * s_k
+    if reference is not None:
+        ref_k, ref_r, ref_h = reference
+        anchored -= ref_k
+    else:
+        for start in range(0, hnew.shape[-1], dim):
+            anchored[..., start : start + dim, start : start + dim] -= origin * s_k
     rh, hr, s_mesh = localized_transform(
         k, src["k/mesh"][:], atoms, np.diff(bounds), anchored, s_k
     )
@@ -130,7 +134,7 @@ def write_ordinary(out, src, atoms, bounds, r_ao, s_ao, k, s_k, hnew):
         rh, s_mesh, r_ao, s_ao
     )
     del s_mesh
-    translations = np.unique(np.vstack([rh, r_ao]), axis=0)
+    translations = np.unique(np.vstack([rh, r_ao] if reference is None else [rh, r_ao, ref_r]), axis=0)
     mapping = {tuple(r): i for i, r in enumerate(translations)}
     out["real/R"] = translations
     hds = out.create_dataset(
@@ -143,9 +147,15 @@ def write_ordinary(out, src, atoms, bounds, r_ao, s_ao, k, s_k, hnew):
     )
     for i, r in enumerate(rh):
         hds[0, mapping[tuple(r)]] = hr[0, i]
+    if reference is not None:
+        for i, r in enumerate(ref_r):
+            row = mapping[tuple(r)]
+            hds[0, row] = hds[0, row] + ref_h[i]
     for i, r in enumerate(r_ao):
         row = mapping[tuple(r)]
         sds[row] = s_ao[i]
+        if reference is not None:
+            continue
         for start in range(0, hnew.shape[-1], dim):
             sl = slice(start, start + dim)
             hds[0, row, sl, sl] = hds[0, row, sl, sl] + origin * s_ao[i]

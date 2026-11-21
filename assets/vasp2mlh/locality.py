@@ -10,8 +10,10 @@ from scipy.linalg import block_diag
 from scipy.spatial import ConvexHull, Voronoi
 
 from .calibrate import metric_factors, ordinary_geometry, write_ordinary
-from .model import adjoint, mesh_indices, spin_rotation
+from .model import adjoint, bloch, mesh_indices, spin_rotation
 from .pipeline import output_file, paths_collide
+
+PBE_ANCHORED = "pbe-anchored-v1"
 
 
 PRIOR_WEIGHT = 0.01
@@ -92,14 +94,22 @@ def complete_subspace(
     q = left @ right
     locked = (q * energies[:, None, :]) @ adjoint(q)
     dim, count = q.shape[1:]
-    if not np.isfinite(prior) or prior < np.max(energies) + COMPLEMENT_GAP_EV:
+    scalar_prior = np.ndim(prior) == 0
+    if not np.isfinite(prior).all() or (scalar_prior and prior < np.max(energies) + COMPLEMENT_GAP_EV):
         raise ValueError("Localized complement prior lies inside retained bands")
     if count == dim:
         return locked, singular[:, -1] ** 2, 0
     z = np.linalg.qr(q, mode="complete")[0][:, :, count:]
     zt = adjoint(z)
-    eye = np.eye(dim)
-    h = locked + prior * (z @ zt)
+    target = prior * np.eye(dim) if scalar_prior else prior
+    floor = energies[:, -1, None] + COMPLEMENT_GAP_EV
+
+    def feasible(candidate):
+        ev, vec = np.linalg.eigh(zt @ candidate @ z)
+        frame = z @ vec
+        return locked + (frame * np.maximum(ev, floor)[:, None, :]) @ adjoint(frame)
+
+    h = locked + prior * (z @ zt) if scalar_prior else feasible(target)
     ix = mesh_indices(points, mesh)
     lookup = {tuple(index): i for i, index in enumerate(ix)}
     neighbors = []
@@ -113,14 +123,10 @@ def complete_subspace(
     a = PRIOR_WEIGHT
     lipschitz = 2 - a
     momentum = (np.sqrt(lipschitz) - np.sqrt(a)) / (np.sqrt(lipschitz) + np.sqrt(a))
-    floor = energies[:, -1, None] + COMPLEMENT_GAP_EV
-
     def update(y):
-        avg = sum(y[peer] * transport for peer, transport in neighbors)
-        candidate = y + ((1 - a) * avg + a * prior * eye - y) / lipschitz
-        ev, vec = np.linalg.eigh(zt @ candidate @ z)
-        frame = z @ vec
-        return locked + (frame * np.maximum(ev, floor)[:, None, :]) @ adjoint(frame)
+        residual = y - target
+        avg = sum(residual[peer] * transport for peer, transport in neighbors)
+        return feasible(y + ((1 - a) * avg - residual) / lipschitz)
 
     y = h
     for step in range(1, 501):
@@ -132,7 +138,7 @@ def complete_subspace(
     raise ValueError("Localized PAW complement did not converge in 500 iterations")
 
 
-def locality_model(model, overlap_file, output, band_range, energy_window):
+def locality_model(model, overlap_file, output, band_range, energy_window, *, pbe_model=None):
     """Write the constrained Hamiltonian in the same fixed ordinary AO basis."""
     if paths_collide(output, (model, overlap_file)):
         raise ValueError("Choose a separate localized-model destination")
@@ -181,6 +187,18 @@ def locality_model(model, overlap_file, output, band_range, energy_window):
 
                 v[i] = projected[:, :n]
                 out["k/projection"][0, i] = roots[i] @ projected
+            prior = ef + PRIOR_OFFSET_EV
+            reference = None
+            if pbe_model is not None:
+                with h5py.File(pbe_model) as pbe:
+                    ordinary_geometry(pbe, ov)
+                    offset = ef - pbe.attrs["fermi_eV"]
+                    ref_r = pbe["real/R"][:]
+                    ref_h = pbe["real/H"][0] + offset * pbe["real/S"][:]
+                    ref_k = bloch(k, ref_r, ref_h)
+                    inv_roots = np.linalg.inv(roots)
+                    prior = inv_roots @ ref_k @ inv_roots
+                    reference = (ref_k, ref_r, ref_h)
             h, weights, steps = complete_subspace(
                 k,
                 src["k/mesh"][:],
@@ -188,7 +206,7 @@ def locality_model(model, overlap_file, output, band_range, energy_window):
                 positions,
                 v,
                 energies[:, :n],
-                ef + PRIOR_OFFSET_EV,
+                prior,
             )
             write_ordinary(
                 out,
@@ -200,6 +218,7 @@ def locality_model(model, overlap_file, output, band_range, energy_window):
                 k,
                 sk,
                 (roots @ h @ roots)[None],
+                reference=reference,
             )
             recipe = dict(
                 version=1,
@@ -218,6 +237,17 @@ def locality_model(model, overlap_file, output, band_range, energy_window):
                 complement_eV=ef + PRIOR_OFFSET_EV,
                 locality_recipe=json.dumps(recipe),
             )
+            if pbe_model is not None:
+                del out.attrs["complement_eV"]
+                recipe["pbe_reference_completion"] = "locality-constrained"
+                recipe["pbe_reference_prior_offset_eV"] = recipe.pop("prior_offset_eV")
+                recipe["method"] = PBE_ANCHORED
+                out.attrs.update(
+                    hamiltonian_method=PBE_ANCHORED,
+                    complement_policy="fermi_aligned_pbe_matrix",
+                    pbe_alignment_eV=offset,
+                    locality_recipe=json.dumps(recipe),
+                )
             if spinor:
                 out.attrs["source_saxis"] = src.attrs["saxis"]
                 out.attrs["saxis"] = [0.0, 0.0, 1.0]

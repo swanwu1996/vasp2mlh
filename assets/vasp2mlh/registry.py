@@ -217,6 +217,8 @@ def label_definition(f):
     ):
         if key in attrs:
             settings[key] = np.asarray(attrs[key]).tolist()
+    if method == "pbe-anchored-v1":
+        settings["locality_recipe"] = json.loads(attrs["locality_recipe"])
     if method == "locality_constrained_paw":
         recipe = json.loads(attrs["locality_recipe"])
         if not np.isclose(

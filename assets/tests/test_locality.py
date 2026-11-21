@@ -55,6 +55,36 @@ class LocalityTests(unittest.TestCase):
             solve(v * phase[:, :, None], e, positions=pos + shift), expected, atol=2e-7
         )
 
+    def test_matrix_prior_locks_eigenpairs_and_tracks_energy_origin(self):
+        mesh = np.array([2, 1, 1])
+        k = np.array([[0, 0, 0], [0.5, 0, 0]])
+        pos = np.zeros((3, 3))
+        projections = np.array([[[1.0], [0.0], [0.0]]] * 2)
+        energies = np.array([[1.0], [2.0]])
+        prior = np.array(
+            [
+                [[0.0, 3.0, 1.0], [3.0, 8.0, 0.5], [1.0, 0.5, 5.0]],
+                [[0.0, 0.0, 3.0], [0.0, 9.0, 0.2], [3.0, 0.2, 7.0]],
+            ]
+        )
+
+        def solve(e, b):
+            return complete_subspace(k, mesh, np.eye(3), pos, projections, e, b)[0]
+
+        h = solve(energies, prior)
+        np.testing.assert_allclose(
+            h[:, :, 0], projections[:, :, 0] * energies, atol=1e-7
+        )
+        np.testing.assert_allclose(h[:, 1:, 1:], prior[:, 1:, 1:], atol=1e-7)
+        np.testing.assert_allclose(
+            solve(energies + 7, prior + 7 * np.eye(3)), h + 7 * np.eye(3), atol=1e-7
+        )
+        np.testing.assert_allclose(
+            solve(energies, 10.0),
+            solve(energies, np.tile(10 * np.eye(3), (2, 1, 1))),
+            atol=1e-7,
+        )
+
     def test_degenerate_buffer_and_rank_checks(self):
         en = np.array([[-2.0, 0.5, 1.0, 1.0, 5.0], [-1.9, 0.5, 1.0, 1.3, 5.0]])
         for selected, upper in [((1, 2), None), (None, 0.6)]:

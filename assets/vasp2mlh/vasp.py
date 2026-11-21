@@ -56,6 +56,27 @@ def screened_hybrid_maturity(meta):
     return {}
 
 
+def effective_hybrid_flag(parameters):
+    """Read effective exchange activation from the completed run's parameters."""
+    flags = {
+        "T": "T",
+        "TRUE": "T",
+        ".TRUE.": "T",
+        "F": "F",
+        "FALSE": "F",
+        ".FALSE.": "F",
+    }
+    values = {
+        flags.get((node.text or "").strip().upper())
+        for node in parameters.findall(".//*[@name='LHFCALC']")
+    }
+    if values not in ({"T"}, {"F"}):
+        raise ValueError(
+            "Missing, ambiguous or invalid effective LHFCALC in VASP XML; cannot identify the functional"
+        )
+    return values.pop()
+
+
 def spectral_mode(meta):
     if meta.get("spinor"):
         return "noncollinear"
@@ -203,6 +224,7 @@ def metadata(path):
         if node.attrib.get("name", "").strip() in operator_names | HYBRID_TAGS
         or node.attrib.get("name", "").strip().startswith("LIBXC")
     }
+    operator_parameters["LHFCALC"] = effective_hybrid_flag(params)
     types = root.findall("./atominfo/array[@name='atomtypes']/set/rc")
     neutral = sum(int(row[0].text) * float(row[3].text) for row in types)
     titles = {row[1].text.strip(): row[4].text.strip() for row in types}
