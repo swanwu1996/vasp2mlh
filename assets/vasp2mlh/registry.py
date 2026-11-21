@@ -7,7 +7,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-from .configuration import BOUNDED_COLLINEAR, HSE_POLAR, SCALAR_POLAR, SPINOR_POLAR, HUBBARD_POLAR, load_config
+from .configuration import COLLINEAR_POLAR, BOUNDED_COLLINEAR, HSE_POLAR, SCALAR_POLAR, SPINOR_POLAR, HUBBARD_POLAR, load_config
 from .basis import Shell, load_basis, read_potcar
 from .pipeline import output_file
 from .realspace import SPARSE_FORMAT, structure
@@ -241,14 +241,14 @@ def label_definition(f):
     if method in {"hybrid_spectral_ritz", "spinor_spectral_ritz", SPINOR_POLAR}:
         settings.pop("complement_eV")
         settings["complement_policy"] = attrs["complement_policy"]
-    if method in {SCALAR_POLAR, SPINOR_POLAR, HUBBARD_POLAR, BOUNDED_COLLINEAR, "hubbard-paw-ritz-v1", "filtered_paw_ritz", "hybrid_spectral_ritz", "spinor_spectral_ritz"}:
+    if method in {SCALAR_POLAR, COLLINEAR_POLAR, SPINOR_POLAR, HUBBARD_POLAR, BOUNDED_COLLINEAR, "hubbard-paw-ritz-v1", "filtered_paw_ritz", "hybrid_spectral_ritz", "spinor_spectral_ritz"}:
         for key in ("filter_width_eV", "filter_floor", "filter_taper_eV"):
             settings[key] = float(attrs[key])
         settings["centre_offset_eV"] = round(
             float(attrs["filter_centre_eV"] - attrs["fermi_eV"]), 10
         )
-    recipe_key = {BOUNDED_COLLINEAR: "collinear_recipe", SCALAR_POLAR: "polar_recipe", SPINOR_POLAR: "polar_recipe", HUBBARD_POLAR: "polar_recipe"}.get(method, "hubbard_recipe")
-    if recipe_key in attrs or method in {"hubbard-paw-ritz-v1", BOUNDED_COLLINEAR, SCALAR_POLAR, SPINOR_POLAR, HUBBARD_POLAR}:
+    recipe_key = {BOUNDED_COLLINEAR: "collinear_recipe", SCALAR_POLAR: "polar_recipe", COLLINEAR_POLAR: "polar_recipe", SPINOR_POLAR: "polar_recipe", HUBBARD_POLAR: "polar_recipe"}.get(method, "hubbard_recipe")
+    if recipe_key in attrs or method in {"hubbard-paw-ritz-v1", BOUNDED_COLLINEAR, SCALAR_POLAR, COLLINEAR_POLAR, SPINOR_POLAR, HUBBARD_POLAR}:
         recipe = json.loads(attrs[recipe_key])
         limit = recipe.pop("linear_through_eV")
         target = recipe["energy_window_from_fermi_eV"]
@@ -257,9 +257,11 @@ def label_definition(f):
             if target is not None
             else np.max(f["k/eigenvalues"][:, :, recipe["band_range_1based"][1] - 1])
         )
+        if recipe.get("anchor_policy") == "ordered-source-envelope":
+            upper = max(upper, np.max(f["k/eigenvalues"][:, :, recipe["band_range_1based"][1] - 1]))
         # XML levels may be rounded to four decimals. k/eigenvalues
         # contains the corresponding WAVECAR double precision values.
-        tol = 1e-4 if target is None else 1e-7
+        tol = 1e-4 if target is None or recipe.get("anchor_policy") else 1e-7
         if not np.isclose(limit, upper + recipe["upper_buffer_eV"], atol=tol, rtol=0):
             raise ValueError("Inconsistent target-window spectral bound")
         if recipe.get("filter_centre_policy") == "max-fermi-plus-6-or-target-plus-2":

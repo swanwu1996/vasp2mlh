@@ -14,7 +14,7 @@ from ase.io import read, write
 
 from . import __version__
 from .comparison import periodic_match
-from .configuration import BOUNDED_COLLINEAR, HSE_POLAR, SCALAR_POLAR, SPINOR_POLAR, HUBBARD_POLAR
+from .configuration import COLLINEAR_POLAR, BOUNDED_COLLINEAR, HSE_POLAR, SCALAR_POLAR, SPINOR_POLAR, HUBBARD_POLAR
 from .filtering import filter_model
 from .polar import MIN_POLAR_SINGULAR_VALUE, hse_polar_model
 from .locality import locality_model, PBE_ANCHORED, PRIOR_OFFSET_EV, WINDOW_FIRST_BUFFER
@@ -556,6 +556,47 @@ def pbe_input_hashes(directory):
     }
 
 
+def source_window_bands(levels, window):
+    """Smallest ordered envelope of source states touching the energy interval."""
+    inside = np.any((levels >= window[0]) & (levels <= window[1]), axis=(0, 1))
+    indices = np.flatnonzero(inside)
+    if not indices.size:
+        raise ValueError("No source states in the polar energy window. Supply an ordered band range.")
+    return [int(indices[0]) + 1, int(indices[-1]) + 1]
+
+
+def release_recipe(src, method, policy):
+    """Choose a physical reconstruction for the installed release line."""
+    major = __version__.split(".")[0]
+    screened = bool(screened_hybrid_maturity(src))
+    auto = method in (None, "auto")
+    if major == "1":
+        if method in (SCALAR_POLAR, COLLINEAR_POLAR, HUBBARD_POLAR, SPINOR_POLAR, HSE_POLAR):
+            raise ValueError(f"{method} requires the 2.x polar release")
+        if screened:
+            if policy not in (None, "auto", "global-buffer-1"):
+                raise ValueError("The target-first HSE buffer policy requires the 2.x polar release")
+            policy = "global-buffer-1"
+        return method, policy
+    if major != "2":
+        raise ValueError(f"Unknown reconstruction release line {major}")
+    if screened:
+        if method not in (None, "auto", PBE_ANCHORED, HSE_POLAR) or policy not in (None, "auto", WINDOW_FIRST_BUFFER):
+            raise ValueError("2.x screened HSE requires target-first PBE-referenced completion")
+        return (PBE_ANCHORED if auto else method), WINDOW_FIRST_BUFFER
+    if is_hybrid(src):
+        raise ValueError("2.x supports scalar screened PBE hybrids for polar reconstruction")
+    if src["spinor"]:
+        selected = SPINOR_POLAR
+    elif is_hubbard(src):
+        selected = HUBBARD_POLAR
+    else:
+        selected = COLLINEAR_POLAR if src["nspin"] == 2 else SCALAR_POLAR
+    if not auto and method != selected:
+        raise ValueError(f"2.x requires {selected} for this source")
+    return selected, policy
+
+
 def reconstruct(
     run,
     registry,
@@ -605,12 +646,13 @@ def reconstruct(
     xml_hash = file_sha256(run / "vasprun.xml")
     src = metadata(run / "vasprun.xml")
     check_source(src, run)
+    completion_method, retained_policy = release_recipe(src, completion_method, retained_policy)
     hse_polar = completion_method == HSE_POLAR
     if hse_polar and band_range is None:
         raise ValueError(f"{HSE_POLAR} requires an ordered band range")
     spinor_polar = completion_method == SPINOR_POLAR
     hubbard_polar = completion_method == HUBBARD_POLAR
-    polar_window = completion_method in (SCALAR_POLAR, SPINOR_POLAR, HUBBARD_POLAR)
+    polar_window = completion_method in (SCALAR_POLAR, COLLINEAR_POLAR, SPINOR_POLAR, HUBBARD_POLAR)
     if cutoff is None:
         cutoff = 18.0 if is_hubbard(src) or polar_window or completion_method == BOUNDED_COLLINEAR else 12.0
     pbe_dir = resolve_pbe_run(src, run, pbe_run, completion_method, retained_policy)
@@ -647,15 +689,17 @@ def reconstruct(
             "Spectral projection uses the source WAVECAR; omit potential_run"
         )
     bounded_collinear = completion_method == BOUNDED_COLLINEAR
-    if completion_method == SCALAR_POLAR and (src["nspin"] != 1 or mode or is_hubbard(src) or band_range is None):
-        raise ValueError(f"{SCALAR_POLAR} requires a nonmagnetic semilocal source and an ordered band range")
-    if hubbard_polar and (mode or not is_hubbard(src) or band_range is None):
-        raise ValueError(f"{HUBBARD_POLAR} requires scalar or collinear DFT+U and an ordered band range")
-    if spinor_polar and (not src["spinor"] or is_hybrid(src) or band_range is None):
-        raise ValueError(f"{SPINOR_POLAR} requires semilocal spinor eigenpairs and an ordered band range")
+    if completion_method in (SCALAR_POLAR, COLLINEAR_POLAR):
+        channels = 2 if completion_method == COLLINEAR_POLAR else 1
+        if src["nspin"] != channels or mode or is_hubbard(src):
+            raise ValueError(f"{completion_method} requires {channels} semilocal PAW channel(s) without U")
+    if hubbard_polar and (mode or not is_hubbard(src)):
+        raise ValueError(f"{HUBBARD_POLAR} requires scalar or collinear DFT+U")
+    if spinor_polar and (not src["spinor"] or is_hybrid(src)):
+        raise ValueError(f"{SPINOR_POLAR} requires semilocal spinor eigenpairs")
     if bounded_collinear and (src["nspin"] != 2 or mode or is_hubbard(src) or energy_window is None):
         raise ValueError(f"{BOUNDED_COLLINEAR} requires two collinear semilocal channels without U and an energy window")
-    if completion_method not in (None, PBE_ANCHORED, HSE_POLAR, BOUNDED_COLLINEAR, SCALAR_POLAR, SPINOR_POLAR, HUBBARD_POLAR, "spectral-ritz", "locality-constrained"):
+    if completion_method not in (None, PBE_ANCHORED, HSE_POLAR, BOUNDED_COLLINEAR, SCALAR_POLAR, COLLINEAR_POLAR, SPINOR_POLAR, HUBBARD_POLAR, "spectral-ritz", "locality-constrained"):
         raise ValueError(f"Unknown completion method {completion_method}")
     auto_centre = centre_offset is None
     if auto_centre:
@@ -670,7 +714,7 @@ def reconstruct(
     ):
         raise ValueError("Set completion_method='spectral-ritz' to use Ritz filter controls")
     if floor is None:
-        small_floor = (mode is not None and not spinor_polar) or bounded_collinear or completion_method == SCALAR_POLAR
+        small_floor = (mode is not None and not spinor_polar) or bounded_collinear or completion_method in (SCALAR_POLAR, COLLINEAR_POLAR)
         floor = 0.0001 if small_floor else 0.005
     if pbe_dir is not None:
         pbe_hashes = pbe_input_hashes(pbe_dir)
@@ -704,6 +748,9 @@ def reconstruct(
         or np.any(src["eig"][:, :, -1] <= abs_window[1])
     ):
         raise ValueError("Source VASP spectrum must extend above the energy window")
+    anchor_range = band_range
+    if polar_window and anchor_range is None:
+        anchor_range = source_window_bands(src["eig"], abs_window)
     window_recipe = None
     if is_hubbard(src) or bounded_collinear or polar_window:
         upper = (
@@ -720,6 +767,10 @@ def reconstruct(
             saturation_width_eV=2.0,
         )
         if polar_window:
+            upper = max(upper, float(src["eig"][:, :, anchor_range[1] - 1].max()))
+            window_recipe.update(band_range_1based=anchor_range, linear_through_eV=upper + 2.0)
+            if energy_window is not None:
+                window_recipe["anchor_policy"] = "ordered-source-envelope"
             window_recipe.update(method=completion_method, degeneracy_eV=DEGENERACY_EV, min_singular_value=MIN_POLAR_SINGULAR_VALUE)
             if spinor_polar:
                 window_recipe.update(prior="bounded_spinor_spectral_ritz", prior_offset_eV=PRIOR_OFFSET_EV)
@@ -896,6 +947,7 @@ def reconstruct(
                 if mode
                 else "scalar-band-reconstruction/1",
                 version=__version__,
+                algorithm_family="original" if __version__.split(".")[0] == "1" else "polar",
                 status="source_mesh_passed"
                 if mesh_score["observations"]
                 else "source_mesh_no_states",
@@ -1017,6 +1069,8 @@ def reconstruct(
                         alignment_eV=float(model.attrs["pbe_alignment_eV"]),
                     ),
                 )
+            if pbe_dir is not None and retained_policy is None:
+                report["retained_policy"] = "global-buffer-1"
             if retained_policy is not None:
                 report["retained_policy"] = retained_policy
                 if hse_polar:

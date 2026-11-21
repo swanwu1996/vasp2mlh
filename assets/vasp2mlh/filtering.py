@@ -8,7 +8,7 @@ import numpy as np
 from scipy.linalg import block_diag, eigh
 from scipy.special import expit
 
-from .configuration import BOUNDED_COLLINEAR, SCALAR_POLAR, SPINOR_POLAR, HUBBARD_POLAR
+from .configuration import COLLINEAR_POLAR, BOUNDED_COLLINEAR, SCALAR_POLAR, SPINOR_POLAR, HUBBARD_POLAR
 from .polar import MIN_POLAR_SINGULAR_VALUE, anchor_polar_window  # re-export the scalar API
 from .calibrate import metric_factors, ordinary_geometry, write_ordinary
 from .model import adjoint, spin_rotation
@@ -111,10 +111,12 @@ def filter_model(
             raise ValueError("A Hubbard polar window requires a direct scalar or collinear DFT+U operator")
         if polar_recipe is not None and not (spinor_polar or hubbard_polar) and (
             src.attrs.get("hamiltonian_method") != "direct_scalar_paw"
-            or src["k/H"].shape[0] != 1 or src.attrs.get("spinor", False)
+            or src["k/H"].shape[0] != (2 if polar_recipe.get("method") == COLLINEAR_POLAR else 1)
+            or polar_recipe.get("method", SCALAR_POLAR) not in (SCALAR_POLAR, COLLINEAR_POLAR)
+            or src.attrs.get("spinor", False)
             or spectral or hubbard_recipe is not None or collinear_recipe is not None
         ):
-            raise ValueError("A scalar polar window requires a nonmagnetic semilocal operator")
+            raise ValueError("A semilocal polar window requires the corresponding scalar or collinear PAW channels")
         bound = polar_recipe or collinear_recipe or hubbard_recipe
         spinor = bool(src.attrs.get("spinor", False))
         if (
@@ -132,6 +134,8 @@ def filter_model(
         centre = float(src.attrs["fermi_eV"] + centre_offset)
         if spinor_polar:
             upper = float(energies[:, :, polar_recipe["band_range_1based"][1] - 1].max())
+            if polar_recipe.get("anchor_policy") == "ordered-source-envelope":
+                upper = max(upper, src.attrs["fermi_eV"] + polar_recipe["energy_window_from_fermi_eV"][1])
             # Use WAVECAR precision for the spectral bound and the polar anchor.
             polar_recipe = dict(polar_recipe, linear_through_eV=upper + polar_recipe["upper_buffer_eV"])
             bound = polar_recipe
@@ -221,7 +225,7 @@ def filter_model(
             )
 
             if polar_recipe is not None:
-                out.attrs["hamiltonian_method"] = polar_recipe["method"] if spinor_polar or hubbard_polar else SCALAR_POLAR
+                out.attrs["hamiltonian_method"] = polar_recipe.get("method", SCALAR_POLAR)
                 out.attrs["polar_recipe"] = json.dumps(polar_recipe)
                 if hubbard_recipe is not None:
                     out.attrs["hubbard_recipe"] = json.dumps(polar_recipe)

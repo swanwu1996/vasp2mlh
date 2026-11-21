@@ -1,5 +1,7 @@
 # Place beside the HSE outputs. This optional guard requires a scalar screened hybrid.
 completion_method = "pbe-anchored-v1"
+# 1.x fits a joint retained frame. 2.x protects the target before its buffer.
+# For either line, a one-based inclusive band_range selects an ordered target.
 # Compatible dense PBE runs are discovered in pbe* children and siblings.
 # pbe_run = "../pbe-dense"
 # energy_window = [-1.0, 2.0]   # eV relative to the source Fermi level

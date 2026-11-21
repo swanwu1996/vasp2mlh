@@ -65,6 +65,7 @@ def load_config(path):
 
 
 BATCH_CONTROLS = {"workers", "threads", "backend", "check_only", "fast_resume"}
+COLLINEAR_POLAR = "collinear-polar-window-v1"
 SCALAR_POLAR = "scalar-polar-window-v1"
 HSE_POLAR = "hse-polar-window-v1"
 HUBBARD_POLAR = "hubbard-polar-window-v1"

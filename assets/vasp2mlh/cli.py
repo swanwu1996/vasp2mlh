@@ -9,7 +9,7 @@ from xml.etree.ElementTree import ParseError
 import h5py
 import numpy as np
 
-from .configuration import BOUNDED_COLLINEAR, HSE_POLAR, SCALAR_POLAR, SPINOR_POLAR, HUBBARD_POLAR
+from .configuration import COLLINEAR_POLAR, BOUNDED_COLLINEAR, HSE_POLAR, SCALAR_POLAR, SPINOR_POLAR, HUBBARD_POLAR
 from .atomic import COMPACT_METHOD, NATIVE_METHOD
 from .comparison import compare_path, write_comparison
 from .analysis import held_out, locality, lobster_summary, spectra
@@ -203,9 +203,9 @@ def make_parser():
         operation.add_argument("--pbe-run", help="denser matching PBE SCF directory for scalar HSE (default: RUN/pbe)")
         operation.add_argument(
             "--completion-method",
-            choices=("auto", "spectral-ritz", "locality-constrained", "pbe-anchored-v1", HSE_POLAR, BOUNDED_COLLINEAR, SCALAR_POLAR, SPINOR_POLAR, HUBBARD_POLAR),
+            choices=("auto", "spectral-ritz", "locality-constrained", "pbe-anchored-v1", HSE_POLAR, BOUNDED_COLLINEAR, SCALAR_POLAR, COLLINEAR_POLAR, SPINOR_POLAR, HUBBARD_POLAR),
             default=None,
-            help="automatic from VASP XML: scalar HSE uses pbe-anchored-v1 (beta) or explicitly hse-polar-window-v1 with an ordered band range (experimental); scalar/collinear DFT+U reads the full PAW strengths; collinear-window-ritz-v1 is an optional bounded method for two semilocal spin channels. scalar-polar-window-v1 anchors an ordered nonmagnetic semilocal band range (experimental). spinor-polar-window-v1 anchors a semilocal spinor band range with optional Hubbard U and SOC (experimental). hubbard-polar-window-v1 uses a direct scalar or collinear DFT+U prior (experimental)",
+            help="The installed major release selects the method from VASP metadata. 1.x uses the original Ritz or joint locality completion. 2.x anchors the polar target frame, separately for collinear channels and jointly for spinors. Screened HSE uses a matched PBE reference. Use band_range for a fixed ordered target.",
         )
         operation.add_argument(
             "--centre-offset",

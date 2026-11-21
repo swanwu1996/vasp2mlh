@@ -17,12 +17,13 @@ import h5py
 from threadpoolctl import threadpool_limits
 
 from . import __version__
-from .band_release import default_reference, check_source, reconstruct, reference_points, resolve_pbe_run, check_pbe_pair
+from .band_release import default_reference, check_source, reconstruct, reference_points, resolve_pbe_run, check_pbe_pair, release_recipe, source_window_bands
 from .basis import radial_backend
 from .configuration import (
     BATCH_CONTROLS,
     BOUNDED_COLLINEAR,
     SCALAR_POLAR,
+    COLLINEAR_POLAR,
     SPINOR_POLAR,
     HSE_POLAR,
     HUBBARD_POLAR,
@@ -33,7 +34,7 @@ from .configuration import (
 )
 from .pipeline import build, file_sha256, output_file, projection_header
 from .operator import check_potential_records, check_potential_source
-from .vasp import is_hubbard, is_hybrid, spectral_mode, metadata
+from .vasp import is_hubbard, spectral_mode, metadata
 from xml.etree.ElementTree import ParseError
 from .realspace import SPARSE_FORMAT
 from .progress import progress_bar
@@ -187,7 +188,7 @@ def read_jobs(manifest, config=None):
                     raise ValueError(f"Unknown retained policy for job {label}")
             elif key == "completion_method":
                 choices = {
-                    "validated": (BOUNDED_COLLINEAR, SCALAR_POLAR, HUBBARD_POLAR),
+                    "validated": (BOUNDED_COLLINEAR, SCALAR_POLAR, COLLINEAR_POLAR, HUBBARD_POLAR),
                     "hybrid": ("spectral-ritz", "locality-constrained", "pbe-anchored-v1", HSE_POLAR),
                     "noncollinear": ("spectral-ritz", "locality-constrained", SPINOR_POLAR),
                 }[mode]
@@ -509,22 +510,6 @@ def preflight(job):
                 f"Batch mode {job['mode']} disagrees with source mode {spectral_mode(src) or 'validated'}"
             )
         check_source(src, run)
-        if job["options"].get("completion_method") == HSE_POLAR and "band_range" not in job["options"]:
-            raise ValueError(f"{HSE_POLAR} requires an ordered band range")
-        if job["options"].get("completion_method") == HUBBARD_POLAR and (
-            not is_hubbard(src) or "band_range" not in job["options"]
-        ):
-            raise ValueError(f"{HUBBARD_POLAR} requires DFT+U and an ordered band range")
-        if job["options"].get("completion_method") == SPINOR_POLAR and (
-            is_hybrid(src) or "band_range" not in job["options"]
-        ):
-            raise ValueError(f"{SPINOR_POLAR} requires semilocal spinor eigenpairs and an ordered band range")
-        if job["options"].get("completion_method") == SCALAR_POLAR:
-            if src["nspin"] != 1 or is_hubbard(src) or "band_range" not in job["options"]:
-                raise ValueError(f"{SCALAR_POLAR} requires nonmagnetic semilocal data and an ordered band range")
-        if job["options"].get("completion_method") == BOUNDED_COLLINEAR:
-            if src["nspin"] != 2 or is_hubbard(src) or "energy_window" not in job["options"]:
-                raise ValueError(f"{BOUNDED_COLLINEAR} requires collinear semilocal data without U and an energy window")
     wave, _ = projection_header(run, src, job["options"].get("mesh"))
     symbols = src["atoms"].get_chemical_symbols()
     basis = read_registry(job["registry"], symbols)
@@ -551,6 +536,15 @@ def preflight(job):
         with h5py.File(job["potential_run"] / "vaspout.h5") as potential:
             check_potential_records(potential)
     if job["mode"] != "projection":
+        method, _ = release_recipe(src, job["options"].get("completion_method"), job["options"].get("retained_policy"))
+        if method == HSE_POLAR and "band_range" not in job["options"]:
+            raise ValueError(f"{HSE_POLAR} requires an ordered band range")
+        if method in (SCALAR_POLAR, COLLINEAR_POLAR, SPINOR_POLAR, HUBBARD_POLAR) and "band_range" not in job["options"]:
+            window = job["options"]["energy_window"]
+            source_window_bands(src["eig"], [src["efermi"] + value for value in window])
+        if job["options"].get("completion_method") == BOUNDED_COLLINEAR:
+            if src["nspin"] != 2 or is_hubbard(src) or "energy_window" not in job["options"]:
+                raise ValueError(f"{BOUNDED_COLLINEAR} requires collinear semilocal data without U and an energy window")
         reference_points(src, job["reference"])
     return {
         "kpoints": projected,
