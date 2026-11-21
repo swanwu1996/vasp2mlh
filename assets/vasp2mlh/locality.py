@@ -16,6 +16,7 @@ from .pipeline import output_file, paths_collide
 
 PBE_ANCHORED = "pbe-anchored-v1"
 WINDOW_FIRST_BUFFER = "window-first-buffer-2"
+COMMON_WINDOW_BUFFER = "window-first-common-buffer-2"
 
 
 PRIOR_WEIGHT = 0.01
@@ -48,7 +49,7 @@ def retained_counts(energies, dimension, band_range, upper, policy):
     if policy is None:
         count = retained_bands(energies, dimension, band_range, upper)
         return np.full(len(energies), count, dtype=int)
-    if policy != WINDOW_FIRST_BUFFER:
+    if policy not in (WINDOW_FIRST_BUFFER, COMMON_WINDOW_BUFFER):
         raise ValueError(f"Unknown retained-band policy {policy}")
     top = (
         band_range[1]
@@ -57,6 +58,9 @@ def retained_counts(energies, dimension, band_range, upper, policy):
     )
     if top < 1:
         raise ValueError("No VASP bands below the target energy window")
+    if policy == COMMON_WINDOW_BUFFER:
+        count = retained_bands(energies, dimension, (1, top + 1), None)
+        return np.full(len(energies), count, dtype=int)
     # The requested manifold is common to all k. Close just the boundary
     # multiplet of the second buffer band at its own k point.
     return np.array(
@@ -263,7 +267,7 @@ def locality_model(model, overlap_file, output, band_range, energy_window, *, pb
         )
         n = int(max(counts))
         protected = None
-        if retained_policy == WINDOW_FIRST_BUFFER:
+        if retained_policy in (WINDOW_FIRST_BUFFER, COMMON_WINDOW_BUFFER):
             window = None if energy_window is None else ef + np.asarray(energy_window)
             protected = protected_intervals(energies, band_range, window)
         roots = np.empty((len(k), dim, dim), complex)
@@ -342,7 +346,7 @@ def locality_model(model, overlap_file, output, band_range, energy_window, *, pb
                     retained_policy=retained_policy,
                     buffer_bands=2,
                     polar_order="target_then_remainder",
-                    boundary_multiplets="same_k",
+                    boundary_multiplets="all_k" if retained_policy == COMMON_WINDOW_BUFFER else "same_k",
                 )
                 out.attrs["locality_recipe"] = json.dumps(recipe)
                 out["locality/retained_by_k"] = counts

@@ -4,5 +4,7 @@ completion_method = "pbe-anchored-v1"
 # For either line, a one-based inclusive band_range selects an ordered target.
 # Compatible dense PBE runs are discovered in pbe* children and siblings.
 # pbe_run = "../pbe-dense"
+# For 2.1.x, opt in to common retained-band counts on each source mesh.
+# retained_policy = "window-first-common-buffer-2"
 # energy_window = [-1.0, 2.0]   # eV relative to the source Fermi level
 # cutoff = 12.0                 # angstrom

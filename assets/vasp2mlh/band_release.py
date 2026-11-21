@@ -17,7 +17,7 @@ from .comparison import periodic_match
 from .configuration import COLLINEAR_POLAR, BOUNDED_COLLINEAR, HSE_POLAR, SCALAR_POLAR, SPINOR_POLAR, HUBBARD_POLAR
 from .filtering import filter_model
 from .polar import MIN_POLAR_SINGULAR_VALUE, hse_polar_model
-from .locality import locality_model, PBE_ANCHORED, PRIOR_OFFSET_EV, WINDOW_FIRST_BUFFER
+from .locality import locality_model, PBE_ANCHORED, PRIOR_OFFSET_EV, WINDOW_FIRST_BUFFER, COMMON_WINDOW_BUFFER
 from .overlap import overlap
 from .pipeline import bands, build, file_sha256, output_file, projection_header
 from .registry import fingerprint, inspect_basis, read_registry
@@ -395,9 +395,9 @@ def resolve_pbe_run(src, run, pbe_run, method, retained_policy=None):
     """Route from the effective VASP parameters, never from a folder name."""
     screened = bool(screened_hybrid_maturity(src))
     if retained_policy not in (None, "auto") and (
-        not screened or retained_policy not in (WINDOW_FIRST_BUFFER, "global-buffer-1")
+        not screened or retained_policy not in (WINDOW_FIRST_BUFFER, COMMON_WINDOW_BUFFER, "global-buffer-1")
     ):
-        raise ValueError("window-first-buffer-2 requires a scalar screened PBE hybrid source")
+        raise ValueError(f"{retained_policy} requires a scalar screened PBE hybrid source")
     if not screened:
         if pbe_run is not None or method in (PBE_ANCHORED, HSE_POLAR):
             raise ValueError(
@@ -581,9 +581,10 @@ def release_recipe(src, method, policy):
     if major != "2":
         raise ValueError(f"Unknown reconstruction release line {major}")
     if screened:
-        if method not in (None, "auto", PBE_ANCHORED, HSE_POLAR) or policy not in (None, "auto", WINDOW_FIRST_BUFFER):
+        if method not in (None, "auto", PBE_ANCHORED, HSE_POLAR) or policy not in (None, "auto", WINDOW_FIRST_BUFFER, COMMON_WINDOW_BUFFER):
             raise ValueError("2.x screened HSE requires target-first PBE-referenced completion")
-        return (PBE_ANCHORED if auto else method), WINDOW_FIRST_BUFFER
+        selected_policy = WINDOW_FIRST_BUFFER if policy in (None, "auto") else policy
+        return (PBE_ANCHORED if auto else method), selected_policy
     if is_hybrid(src):
         raise ValueError("2.x supports scalar screened PBE hybrids for polar reconstruction")
     if src["spinor"]:
@@ -658,11 +659,7 @@ def reconstruct(
     pbe_dir = resolve_pbe_run(src, run, pbe_run, completion_method, retained_policy)
     if completion_method == "auto":
         completion_method = None
-    if pbe_dir is not None:
-        retained_policy = (
-            None if retained_policy == "global-buffer-1" else WINDOW_FIRST_BUFFER
-        )
-    else:
+    if pbe_dir is None or retained_policy == "global-buffer-1":
         retained_policy = None
     inputs = {registry.resolve()}
     for directory in {run, potential, reference, pbe_dir} - {None}:

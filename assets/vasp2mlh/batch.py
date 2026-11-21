@@ -184,7 +184,7 @@ def read_jobs(manifest, config=None):
                 ):
                     raise ValueError(f"Invalid {key} array for job {label}")
             elif key == "retained_policy":
-                if value not in ("window-first-buffer-2", "global-buffer-1"):
+                if value not in ("window-first-buffer-2", "window-first-common-buffer-2", "global-buffer-1"):
                     raise ValueError(f"Unknown retained policy for job {label}")
             elif key == "completion_method":
                 choices = {

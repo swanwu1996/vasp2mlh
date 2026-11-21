@@ -197,8 +197,8 @@ def make_parser():
     for operation in (single, release):
         operation.add_argument(
             "--retained-policy",
-            choices=("auto", "window-first-buffer-2", "global-buffer-1"),
-            help="scalar HSE beta: prioritize the target-band frame; close the second buffer multiplet at each k",
+            choices=("auto", "window-first-buffer-2", "window-first-common-buffer-2", "global-buffer-1"),
+            help="scalar screened hybrids: choose joint or target-first framing and local or common retained-band counts",
         )
         operation.add_argument("--pbe-run", help="denser matching PBE SCF directory for scalar HSE (default: RUN/pbe)")
         operation.add_argument(
