@@ -1,6 +1,7 @@
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 from xml.etree import ElementTree as ET
 
 import numpy as np
@@ -63,6 +64,34 @@ class HybridTests(unittest.TestCase):
                 resolve_pbe_run({**hse, "spinor": True}, run, None, None)
             with self.assertRaisesRegex(ValueError, "pbe_run"):
                 resolve_pbe_run(hse, run, run / "missing", None)
+
+    def test_auto_reference_requires_one_compatible_candidate(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            run = root / "hse"
+            run.mkdir()
+            candidates = (run / "pbe", root / "pbe-dense")
+            for folder in candidates:
+                folder.mkdir()
+                (folder / "vasprun.xml").touch()
+            src = dict(
+                operator_parameters={"LHFCALC": "T", "HFSCREEN": "0.2"},
+                spinor=False,
+                soc=False,
+            )
+
+            def check(src, run, candidate):
+                if candidate == candidates[0]:
+                    raise ValueError("coarse mesh")
+
+            with patch("vasp2mlh.band_release.check_pbe_pair", side_effect=check):
+                self.assertEqual(resolve_pbe_run(src, run, None, "auto"), candidates[1])
+            with patch("vasp2mlh.band_release.check_pbe_pair"):
+                with self.assertRaisesRegex(ValueError, "Several compatible"):
+                    resolve_pbe_run(src, run, None, None)
+                self.assertEqual(
+                    resolve_pbe_run(src, run, candidates[1], None), candidates[1]
+                )
 
     def test_pbe_reference_identity(self):
         with TemporaryDirectory() as temp:

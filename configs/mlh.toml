@@ -1,12 +1,6 @@
-command = "convert"
-[parameters]
-format = "deeph"  # "deeph" or "hamgnn"
-# nao_max = 19  # HamGNN only; choose 14, 19 or 26 to match the AO layout
-run = "mesh"
-reference = "blind"  # used only by v2h_valid
-threads = 2  # BLAS/OpenMP threads for this structure
-output_dir = "mlh"  # new result directory
+# Place this file beside the VASP outputs. All settings are optional.
+format = "deeph"  # use "hamgnn" for a HamGNN graph
+# run = "mesh"
+# output_dir = "mlh"
 # registry = "shared/basis.h5"
-# cutoff = 12.0              # angstrom
-# max_rmse = 0.010           # eV
-# max_error = 0.050          # eV
+# threads = 2

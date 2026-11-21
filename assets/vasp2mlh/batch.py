@@ -17,7 +17,7 @@ import h5py
 from threadpoolctl import threadpool_limits
 
 from . import __version__
-from .band_release import check_source, reconstruct, reference_points, resolve_pbe_run, check_pbe_pair
+from .band_release import default_reference, check_source, reconstruct, reference_points, resolve_pbe_run, check_pbe_pair
 from .basis import radial_backend
 from .configuration import (
     BATCH_CONTROLS,
@@ -57,7 +57,7 @@ def read_jobs(manifest, config=None):
         raise ValueError("Manifest must be an object with a jobs array")
     if not isinstance(config.get("defaults", {}), dict):
         raise ValueError("Manifest defaults must be an object")
-    mode = config.get("mode", "validated")
+    requested_mode = config.get("mode", "auto")
     modes = {
         "validated": {
             "cutoff",
@@ -77,8 +77,8 @@ def read_jobs(manifest, config=None):
     modes["hybrid"] = modes["noncollinear"] = modes["validated"] | {"completion_method"}
     modes["hybrid"] = modes["hybrid"] | {"retained_policy"}
     if (
-        not isinstance(mode, str)
-        or mode not in modes
+        not isinstance(requested_mode, str)
+        or requested_mode not in (*modes, "auto")
         or config.keys()
         - (
             {
@@ -101,13 +101,19 @@ def read_jobs(manifest, config=None):
             raise ValueError("Expected a nonempty manifest path")
         return (manifest.parent / value).resolve()
 
-    registry = path(config["registry"])
+    registry = path(config.get("registry", "basis.h5"))
     jobs = []
     ids = set()
     for row in config["jobs"]:
+        if isinstance(row, str):
+            row = {"run": row}
         if not isinstance(row, dict) or not isinstance(row.get("options", {}), dict):
             raise ValueError("Each job and its options must be objects")
-        label = row["id"]
+        source = path(row["run"])
+        label = row.get("id")
+        if "id" not in row:
+            stem = re.sub(r"[^a-zA-Z0-9_.-]+", "-", source.name).strip("._-") or "run"
+            label = stem[:80] + "-" + hashlib.sha256(str(source).encode()).hexdigest()[:12]
         if (
             not isinstance(label, str)
             or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]*", label)
@@ -115,12 +121,35 @@ def read_jobs(manifest, config=None):
         ):
             raise ValueError(f"Duplicate or invalid job id: {label!r}")
         ids.add(label)
+        mode = requested_mode
+        source_meta = None
+        if mode == "auto":
+            try:
+                source_meta = metadata(source / "vasprun.xml")
+                mode = spectral_mode(source_meta) or "validated"
+            except (OSError, ValueError, ParseError, KeyError, IndexError) as exc:
+                jobs.append(
+                    dict(
+                        id=label,
+                        mode="auto",
+                        run=source,
+                        registry=registry,
+                        options={},
+                        input_error=f"Cannot identify source from {source / 'vasprun.xml'}: {exc}",
+                    )
+                )
+                continue
         allowed = {"id", "run", "options"}
         if mode in ("validated", "hybrid", "noncollinear"):
             allowed.update(("reference", "potential_run"))
         if mode == "hybrid":
             allowed.add("pbe_run")
         options = {**config.get("defaults", {}), **row.get("options", {})}
+        for key in ("completion_method", "retained_policy"):
+            if options.get(key) == "auto":
+                del options[key]
+        if mode != "projection":
+            options = {"cutoff": 12.0, "max_rmse": 0.010, "max_error": 0.050, **options}
         if row.keys() - allowed or options.keys() - modes[mode]:
             raise ValueError(f"Unknown field or option for {mode} job {label}")
         if mode in ("validated", "hybrid", "noncollinear") and not options.keys() & {
@@ -146,7 +175,7 @@ def read_jobs(manifest, config=None):
                 ):
                     raise ValueError(f"Invalid {key} array for job {label}")
             elif key == "retained_policy":
-                if value != "window-first-buffer-2":
+                if value not in ("window-first-buffer-2", "global-buffer-1"):
                     raise ValueError(f"Unknown retained policy for job {label}")
             elif key == "completion_method":
                 if value not in ("spectral-ritz", "locality-constrained", "pbe-anchored-v1"):
@@ -159,16 +188,21 @@ def read_jobs(manifest, config=None):
         job = {
             "id": label,
             "mode": mode,
-            "run": path(row["run"]),
+            "run": source,
             "registry": registry,
             "options": options,
         }
         if mode in ("validated", "hybrid", "noncollinear"):
-            job["reference"] = path(
-                row.get("reference", row["run"])
-                if mode in ("hybrid", "noncollinear")
-                else row["reference"]
-            )
+            if "reference" in row:
+                job["reference"] = path(row["reference"])
+            elif mode == "validated":
+                try:
+                    job["reference"] = default_reference(source_meta, source)
+                except (OSError, ValueError, ParseError, KeyError, IndexError) as exc:
+                    job["input_error"] = str(exc)
+                    job["reference"] = source / "reference"
+            else:
+                job["reference"] = source
             job["potential_run"] = path(row.get("potential_run", row["run"]))
         if "pbe_run" in row:
             job["pbe_run"] = path(row["pbe_run"])
@@ -238,6 +272,8 @@ def convert(job, output, threads, backend=None, fast_resume=False):
     receipt = output / ".batch" / (label + ".json")
     try:
         with backend_setting(backend), threadpool_limits(limits=threads):
+            if "input_error" in job:
+                raise ValueError(job["input_error"])
             files = input_paths(job)
             stamps = [stamp(p) for p in files]
             saved = {}
@@ -416,7 +452,7 @@ def models_from_summary(path):
         with h5py.File(model) as f:
             if (
                 f.attrs.get("batch_id") != name
-                or f.attrs.get("batch_mode") != report.get("mode")
+                or f.attrs.get("batch_mode") != (row.get("mode") if report.get("mode") == "mixed" else report.get("mode"))
                 or f.attrs.get("batch_signature") != row["signature"]
             ):
                 raise ValueError(f"Model signature differs from batch summary: {name}")
@@ -427,6 +463,8 @@ def models_from_summary(path):
 
 
 def preflight(job):
+    if "input_error" in job:
+        raise ValueError(job["input_error"])
     for path in input_paths(job):
         stamp(path)
     run = job["run"]
@@ -473,12 +511,48 @@ def preflight(job):
     }
 
 
+def prepare_batch_registry(jobs, config, state):
+    registry = jobs[0]["registry"]
+    if "registry" not in config and not registry.exists() and not registry.is_symlink():
+        from .atomic import generate
+
+        files = {}
+        for job in jobs:
+            if "input_error" in job:
+                continue
+            path = job["run"] / "POTCAR"
+            try:
+                digest = hash_at_stamp(path, stamp(path))
+            except (OSError, ValueError) as exc:
+                job["input_error"] = str(exc)
+                continue
+            files[digest] = path
+        if not files:
+            return
+        key = hashlib.sha256(
+            json.dumps([__version__, sorted(files)]).encode()
+        ).hexdigest()
+        registry = state / f"compact-{key}.h5"
+        if registry.is_symlink():
+            raise ValueError("Generated batch registry destination is a symlink")
+        if not registry.exists():
+            with output_file(registry) as tmp:
+                generate(tmp, [files[digest] for digest in sorted(files)])
+                if any(file_sha256(path) != digest for digest, path in files.items()):
+                    raise ValueError("POTCAR changed during batch basis generation")
+        for job in jobs:
+            job["registry"] = registry
+    with h5py.File(registry) as basis:
+        if basis.attrs.get("format") != REGISTRY_FORMAT:
+            raise ValueError("Batch conversion requires a frozen AO registry")
+
+
 def run_batch(manifest, output=None, workers=None, threads=None, check_only=None):
     import fcntl
 
     manifest = Path(manifest).resolve()
     config = load_config(manifest)
-    if config.get("command", "convert-batch") != "convert-batch":
+    if config.get("command", "convert-batch") not in ("auto", "convert-batch"):
         raise ValueError("Expected a convert-batch configuration")
     settings = runtime_controls(config, batch=True)
     workers = settings.get("workers", 1) if workers is None else workers
@@ -491,16 +565,13 @@ def run_batch(manifest, output=None, workers=None, threads=None, check_only=None
             and config["output"] != config["output_dir"]
         ):
             raise ValueError("Conflicting output_dir and legacy output paths")
-        destination = config.get("output_dir", config.get("output"))
+        destination = config.get("output_dir", config.get("output", "models"))
         if not isinstance(destination, str) or not destination.strip():
             raise ValueError("Specify the output directory in the configuration")
         output = manifest.parent / destination
     if workers < 1 or threads < 1:
         raise ValueError("Worker and thread counts must be positive")
     jobs = read_jobs(manifest, config)
-    with h5py.File(jobs[0]["registry"]) as registry:
-        if registry.attrs.get("format") != REGISTRY_FORMAT:
-            raise ValueError("Batch conversion requires a frozen AO registry")
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=True)
     state = output / ".batch"
@@ -512,10 +583,26 @@ def run_batch(manifest, output=None, workers=None, threads=None, check_only=None
         destinations.extend(
             [output / (job["id"] + ".h5"), state / (job["id"] + ".json")]
         )
-    protected = {
-        Path(manifest).resolve(),
-        *(p.resolve() for job in jobs for p in input_paths(job)),
-    }
+    protected = {manifest}
+    for job in jobs:
+        paths = [job["registry"]]
+        for role in ("run", "potential_run", "pbe_run", "reference"):
+            if role in job:
+                paths.extend(
+                    job[role] / name
+                    for name in (
+                        "vasprun.xml",
+                        "POTCAR",
+                        "WAVECAR",
+                        "CHGCAR",
+                        "vaspout.h5",
+                    )
+                )
+        try:
+            paths.extend(input_paths(job))
+        except (OSError, ValueError, ParseError, KeyError, IndexError) as exc:
+            job["input_error"] = str(exc)
+        protected.update(path.resolve() for path in paths)
     if any(p.is_symlink() or p.resolve() in protected for p in destinations):
         raise ValueError("A batch destination is a symlink or collides with an input")
     context = multiprocessing.get_context("spawn")
@@ -528,6 +615,7 @@ def run_batch(manifest, output=None, workers=None, threads=None, check_only=None
         progress_bar(label, len(jobs), "job", projected=projected) as bar,
     ):
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        prepare_batch_registry(jobs, config, state)
         results = {}
         write_json(summary_file, {"status": "running", "total": len(jobs)})
 
@@ -592,8 +680,9 @@ def run_batch(manifest, output=None, workers=None, threads=None, check_only=None
             "status": "failed"
             if any(r["status"] == "failed" for r in rows)
             else "complete",
-            "mode": jobs[0]["mode"],
+            "mode": jobs[0]["mode"] if len({job["mode"] for job in jobs}) == 1 else "mixed",
             "check_only": check_only,
+            "registry": str(jobs[0]["registry"]),
             "jobs": rows,
         }
         write_json(summary_file, summary)

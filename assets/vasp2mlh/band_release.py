@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from xml.etree.ElementTree import ParseError
 
 import h5py
 import numpy as np
@@ -223,6 +224,37 @@ def reference_points(src, reference):
     )
 
 
+def default_reference(src, run):
+    if src is not None and spectral_mode(src):
+        return run
+    candidates = sorted(
+        {
+            folder.resolve()
+            for parent in (run, run.parent)
+            for name in ("reference", "blind")
+            if ((folder := parent / name) / "vasprun.xml").is_file()
+            and folder.resolve() != run.resolve()
+        }
+    )
+    if len(candidates) > 1:
+        if src is None:
+            src = metadata(run / "vasprun.xml")
+        hashes = {name: file_sha256(run / name) for name in ("POTCAR", "CHGCAR")}
+        matches = []
+        for folder in candidates:
+            try:
+                reference_data(src, folder, hashes)
+            except (OSError, ValueError, ParseError, KeyError, IndexError):
+                continue
+            matches.append(folder)
+        if len(matches) != 1:
+            raise ValueError(
+                "Cannot select a unique compatible validation calculation; set reference"
+            )
+        return matches[0]
+    return candidates[0] if candidates else run / "reference"
+
+
 def reference_data(src, reference, hashes):
     ref, selected = reference_points(src, reference)
     for name in ("POTCAR", "WAVECAR") if spectral_mode(src) else ("POTCAR", "CHGCAR"):
@@ -264,8 +296,8 @@ def check_source(src, run):
 def resolve_pbe_run(src, run, pbe_run, method, retained_policy=None):
     """Route from the effective VASP parameters, never from a folder name."""
     screened = bool(screened_hybrid_maturity(src))
-    if retained_policy is not None and (
-        not screened or retained_policy != WINDOW_FIRST_BUFFER
+    if retained_policy not in (None, "auto") and (
+        not screened or retained_policy not in (WINDOW_FIRST_BUFFER, "global-buffer-1")
     ):
         raise ValueError("window-first-buffer-2 requires a scalar screened PBE hybrid source")
     if not screened:
@@ -278,11 +310,39 @@ def resolve_pbe_run(src, run, pbe_run, method, retained_policy=None):
         raise ValueError(
             "The HSE beta method requires a scalar source; hybrid spinors are unsupported"
         )
-    if method not in (None, PBE_ANCHORED):
+    if method not in (None, "auto", PBE_ANCHORED):
         raise ValueError(
             "Legacy HSE completion retired. Omit completion_method or use pbe-anchored-v1"
         )
     directory = Path(pbe_run) if pbe_run is not None else run / "pbe"
+    if pbe_run is None:
+        neighbours = sorted(
+            {
+                child.resolve()
+                for parent in (run, run.parent)
+                for child in parent.iterdir()
+                if child.name.lower().startswith("pbe")
+                and (child / "vasprun.xml").is_file()
+            }
+        )
+        if len(neighbours) == 1:
+            return neighbours[0]
+        if len(neighbours) > 1:
+            matches = []
+            for candidate in neighbours:
+                try:
+                    check_pbe_pair(src, run, candidate)
+                except (ValueError, OSError, ParseError, KeyError, IndexError):
+                    continue
+                matches.append(candidate)
+            if len(matches) == 1:
+                return matches[0]
+            if matches:
+                raise ValueError(
+                    "Several compatible PBE references; set pbe_run: "
+                    + ", ".join(map(str, matches))
+                )
+            raise ValueError("No compatible dense PBE reference among " + ", ".join(map(str, neighbours)))
     if not (directory / "vasprun.xml").is_file():
         raise ValueError(
             f"HSE requires a matching dense PBE calculation at {directory}; set pbe_run in mlh.toml"
@@ -440,9 +500,22 @@ def reconstruct(
     run, registry, output = map(Path, (run, registry, output))
     reference = Path(reference) if reference is not None else None
     potential = Path(potential_run) if potential_run else run
+    if output.resolve() == registry.resolve():
+        raise ValueError("Model output collides with the AO registry")
+    xml_hash = file_sha256(run / "vasprun.xml")
+    src = metadata(run / "vasprun.xml")
+    check_source(src, run)
+    pbe_dir = resolve_pbe_run(src, run, pbe_run, completion_method, retained_policy)
+    if completion_method == "auto":
+        completion_method = None
+    if pbe_dir is not None:
+        retained_policy = (
+            None if retained_policy == "global-buffer-1" else WINDOW_FIRST_BUFFER
+        )
+    else:
+        retained_policy = None
     inputs = {registry.resolve()}
-    candidate_pbe = Path(pbe_run) if pbe_run is not None else run / "pbe"
-    for directory in {run, potential, reference, candidate_pbe} - {None}:
+    for directory in {run, potential, reference, pbe_dir} - {None}:
         inputs.update(
             (directory / n).resolve()
             for n in (
@@ -460,10 +533,6 @@ def reconstruct(
         )
     if output.resolve() in inputs:
         raise ValueError("Model output collides with an input")
-    xml_hash = file_sha256(run / "vasprun.xml")
-    src = metadata(run / "vasprun.xml")
-    check_source(src, run)
-    pbe_dir = resolve_pbe_run(src, run, pbe_run, completion_method, retained_policy)
     mode = spectral_mode(src)
     if mode and potential.resolve() != run.resolve():
         raise ValueError(

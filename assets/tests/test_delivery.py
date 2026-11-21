@@ -5,12 +5,13 @@ import shutil
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 import h5py
 import numpy as np
 from vasp2mlh.basis import Shell
 from vasp2mlh.cli import main
-from vasp2mlh.export import deeph, hamgnn
+from vasp2mlh.export import deeph, hamgnn, hamgnn_layout
 from vasp2mlh.pipeline import file_sha256
 from vasp2mlh.readback import load_graph, verify_export
 from vasp2mlh.realspace import SPARSE_FORMAT
@@ -71,6 +72,19 @@ class DeliveryTests(unittest.TestCase):
     def check(self, fmt):
         with h5py.File(self.model) as model:
             return verify_export(self.root, fmt, model, self.ks, 14)
+
+    def test_hamgnn_selects_common_mask_and_preserves_frozen_shells(self):
+        masks = {14: {8: [0], 12: [0, 1]}, 19: {8: [0], 12: [0, 1, 2]}}
+        with patch("vasp2mlh.export.upstream_masks", return_value=masks):
+            self.assertEqual(hamgnn_layout({"O": [0], "Mg": [0, 0]})[0], 14)
+            self.assertEqual(
+                hamgnn_layout({"O": [0], "Mg": [0]}, extend=True),
+                (14, {"O": [0], "Mg": [0, 0]}),
+            )
+            with self.assertRaisesRegex(ValueError, "compatible"):
+                hamgnn_layout({"Mg": [0]})
+            with self.assertRaisesRegex(ValueError, "compatible"):
+                hamgnn_layout({"O": [1]}, extend=True)
 
     def test_hamgnn_output_aliases_preserve_inputs(self):
         for original in (self.model, self.lock):

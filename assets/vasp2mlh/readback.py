@@ -11,7 +11,7 @@ import h5py
 import numpy as np
 from ase.io import read
 
-from .export import OPENMX_ORDER, blocks
+from .export import mask_shells, OPENMX_ORDER, blocks
 from .pipeline import file_sha256
 from .realspace import structure
 from .registry import inspect_basis
@@ -165,6 +165,10 @@ def hamgnn_blocks(path, model, info, nao, *, graph=None):
         and np.allclose(g.pos, atoms.positions / au2ang, atol=2e-6),
         "HamGNN geometry, atom order or AO fingerprint differs",
     )
+    if nao is None:
+        width = np.asarray(g.overlap).shape[-1]
+        nao = next((size for size in (14, 19, 26) if size**2 == width), None)
+        require(nao is not None, "Unrecognized HamGNN overlap width")
     masks = {14: basis_def_14, 19: basis_def_19, 26: basis_def_26}[nao]
     shells = json.loads(model.attrs["shells"])
     slots = []
@@ -173,7 +177,7 @@ def hamgnn_blocks(path, model, info, nao, *, graph=None):
         for l in shells[atom.symbol]:
             order.extend(len(order) + np.array(OPENMX_ORDER[l]))
         mask = np.asarray(masks[atom.number])
-        require(len(mask) == len(order), "HamGNN template disagrees with AO layout")
+        require(mask_shells(nao, mask) == shells[atom.symbol] and len(mask) == len(order), "HamGNN template disagrees with AO layout")
         slots.append(mask[np.argsort(order)])
     edges, shifts = np.asarray(g.edge_index), np.asarray(g.cell_shift)
     ne = len(shifts)
@@ -266,7 +270,7 @@ def verify_export(output, fmt, model, points, nao=None):
         exported = deeph_blocks(folder, model, info)
     else:
         files = [Path(output) / "graph_data.npz"]
-        exported = hamgnn_blocks(files[0], model, info, nao or 14)
+        exported = hamgnn_blocks(files[0], model, info, nao)
 
     result = verify_blocks(exported, fmt, model, points)
     result["file_sha256"] = {str(p.relative_to(output)): file_sha256(p) for p in files}

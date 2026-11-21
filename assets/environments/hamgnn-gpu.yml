@@ -10,8 +10,8 @@ dependencies:
       - torch==2.8.0
       - torch-geometric==2.6.1
       - torch-scatter==2.1.2+pt28cu128
-      - torch-sparse==0.6.18+pt28cu128
-      - e3nn==0.6.1
+      - torch-sparse==0.6.28+pt28cu128
+      - e3nn==0.6.2
       - lightning==2.5.6
       - pymatgen==2025.10.7
       - numpy==2.2.6
@@ -21,6 +21,6 @@ dependencies:
       - torch-runstats==0.2.0
       - torch-ema==0.3
       - HamGNN @ git+https://github.com/QuantumLab-ZY/HamGNN.git@64dba1dbf445ccfa2683f560059c3fbca0df624a
-      - vasp2mlh @ git+https://github.com/swanwu1996/vasp2mlh.git@v0.6.1
+      - vasp2mlh @ git+https://github.com/swanwu1996/vasp2mlh.git@v0.6.2
 variables:
   PYTHONNOUSERSITE: '1'

@@ -1,15 +1,6 @@
-# Screened hybrid reconstruction (including HSE) is beta. Qualify each sample with v2h_valid.
-command = "convert"
-[parameters]
-run = "."
-output_dir = "mlh"
-format = "deeph"
-# registry = "basis.h5"
-# energy_window = [-1.0, 2.0]    # eV relative to the source-mesh Fermi level
-# cutoff = 12.0                  # H block radius in angstrom
+# Place beside the HSE outputs. This optional guard requires a scalar screened hybrid.
 completion_method = "pbe-anchored-v1"
-# Scalar HSE uses pbe-anchored-v1 automatically. Supply a converged denser PBE mesh.
-# pbe_run = "./pbe"              # omitted: RUN/pbe
-# Optional MgO-tested policy for a fixed AO library and target window.
-# retained_policy = "window-first-buffer-2"
-# Independent energies come from KPOINTS_OPT or zero-weight k points in this SCF.
+# Compatible dense PBE runs are discovered in pbe* children and siblings.
+# pbe_run = "../pbe-dense"
+# energy_window = [-1.0, 2.0]   # eV relative to the source Fermi level
+# cutoff = 12.0                 # angstrom

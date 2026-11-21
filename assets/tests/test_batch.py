@@ -44,6 +44,23 @@ class BatchTests(unittest.TestCase):
         self.manifest.write_text(json.dumps(self.config))
         return read_jobs(self.manifest)
 
+    def test_minimal_manifest_routes_and_names_each_source(self):
+        self.config = {"jobs": ["a/mesh", "b/mesh", "_run"]}
+        inputs = [
+            {"operator_parameters": {}},
+            {"spinor": True},
+            {"operator_parameters": {"LHFCALC": "T", "AEXX": "0.25"}},
+        ]
+        with patch("vasp2mlh.batch.metadata", side_effect=inputs):
+            rows = self.write()
+        self.assertEqual(
+            [r["mode"] for r in rows], ["validated", "noncollinear", "hybrid"]
+        )
+        self.assertEqual(len({r["id"] for r in rows}), 3)
+        self.assertTrue(all(r["registry"] == self.registry for r in rows))
+        self.assertEqual(rows[0]["options"]["energy_window"], [-1.0, 2.0])
+        self.assertEqual(rows[1]["reference"], rows[1]["run"])
+
     def test_preflight_and_names(self):
         self.config["jobs"].append({"id": "b", "run": "absent"})
         self.write()
@@ -187,18 +204,18 @@ class BatchTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "changed"):
             models_from_summary(summary)
 
-    def test_validated_requires_reference_and_defaults_to_fermi_window(self):
+    def test_validated_defaults_to_reference_and_fermi_window(self):
         self.config["mode"] = "validated"
-        with self.assertRaisesRegex(ValueError, "window"):
-            self.write()
+        defaults = self.write()[0]["options"]
+        self.assertEqual(defaults["cutoff"], 12.0)
+        self.assertEqual(defaults["max_rmse"], .01)
         self.config["defaults"] = {
             "band_range": [1, 2],
             "cutoff": 5,
             "max_rmse": 0.02,
             "max_error": 0.1,
         }
-        with self.assertRaises(KeyError):
-            self.write()
+        self.assertEqual(self.write()[0]["reference"], self.source / "reference")
         self.config["jobs"][0]["reference"] = "blind"
         self.assertEqual(self.write()[0]["reference"], self.root / "blind")
         del self.config["defaults"]["band_range"]

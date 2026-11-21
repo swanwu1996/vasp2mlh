@@ -143,7 +143,7 @@ def operation_args(command, parser, values):
                 raise ValueError(f"{name} must be true or false")
             result[name] = value
             continue
-        if action.nargs is None:
+        if action.nargs in (None, "?"):
             items = [value]
         else:
             if (

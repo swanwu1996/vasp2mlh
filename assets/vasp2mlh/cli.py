@@ -49,7 +49,7 @@ def make_parser():
     single = subs.add_parser(
         "convert", help="convert one VASP run to MLH training labels"
     )
-    single.add_argument("run", help="VASP directory with a full uniform mesh")
+    single.add_argument("run", nargs="?", default=".", help="VASP directory with a full uniform mesh")
     single.add_argument(
         "--reference",
         help="off-grid reference for v2h_valid (hybrids use same-SCF points in RUN; semilocal default: RUN/reference)",
@@ -73,12 +73,12 @@ def make_parser():
         type=int,
         help="BLAS/OpenMP threads for this structure (default: 1)",
     )
-    single.add_argument("--format", choices=["deeph", "hamgnn"], default="deeph")
+    single.add_argument("--format", choices=["auto", "deeph", "hamgnn"], default="auto")
     single.add_argument(
         "--nao-max",
         type=int,
         choices=[14, 19, 26],
-        help="HamGNN orbital mask size (default: 14)",
+        help="HamGNN orbital mask size (default: smallest compatible template)",
     )
     window = single.add_mutually_exclusive_group()
     window.add_argument(
@@ -190,13 +190,13 @@ def make_parser():
     for operation in (single, release):
         operation.add_argument(
             "--retained-policy",
-            choices=("window-first-buffer-2",),
+            choices=("auto", "window-first-buffer-2", "global-buffer-1"),
             help="scalar HSE beta: prioritize the target-band frame; close the second buffer multiplet at each k",
         )
         operation.add_argument("--pbe-run", help="denser matching PBE SCF directory for scalar HSE (default: RUN/pbe)")
         operation.add_argument(
             "--completion-method",
-            choices=("spectral-ritz", "locality-constrained", "pbe-anchored-v1"),
+            choices=("auto", "spectral-ritz", "locality-constrained", "pbe-anchored-v1"),
             default=None,
             help="automatic from VASP XML: scalar HSE uses pbe-anchored-v1 (beta); other supported hybrids and noncollinear sources default to locality-constrained",
         )
@@ -234,10 +234,17 @@ def make_parser():
     gen.add_argument("output")
     gen.add_argument(
         "--method",
-        choices=(COMPACT_METHOD, NATIVE_METHOD),
+        choices=("auto", COMPACT_METHOD, NATIVE_METHOD),
         default=COMPACT_METHOD,
         help="default: paw-compact-v1; paw-native-v1 is the legacy baseline",
     )
+    gen.add_argument(
+        "--format",
+        choices=("auto", "deeph", "hamgnn"),
+        default="auto",
+        help="adapt a new compact library to the chosen downstream format",
+    )
+    gen.add_argument("--nao-max", type=int, choices=(14, 19, 26))
     gen.add_argument("--potcar", nargs="+", required=True)
     gen.add_argument(
         "--layout",
@@ -270,7 +277,7 @@ def make_parser():
     )
     batch.add_argument("models", nargs="+", help="native models or one finished batch summary.json")
     batch.add_argument("-o", "--output", required=True)
-    batch.add_argument("--basis-lock", required=True)
+    batch.add_argument("--basis-lock", help="optional external AO registry; models always undergo a cohort basis audit")
     make = subs.add_parser(
         "build", help="project WAVECAR using the matching POTCAR and vasprun.xml"
     )
@@ -431,7 +438,7 @@ def make_parser():
     ham.add_argument("models", nargs="+", help="native models or one finished batch summary.json")
     ham.add_argument("--basis-lock")
     ham.add_argument("-o", "--output", required=True)
-    ham.add_argument("--nao-max", type=int, choices=(14, 19, 26), default=14)
+    ham.add_argument("--nao-max", type=int, choices=(14, 19, 26), default=None)
     subspace = subs.add_parser(
         "downfold",
         help="constrain the lowest VASP bands using metric-aware polar orthogonalization",
@@ -495,6 +502,9 @@ def main(argv=None, *, validation_only=False):
             argv = ["convert", "."]
         else:
             argv = ["--help"]
+    if len(argv) == 1 and argv[0] not in commands and Path(argv[0]).is_dir():
+        directory = Path(argv[0])
+        argv = [str(directory / "mlh.toml")] if (directory / "mlh.toml").is_file() else ["convert", str(directory)]
     program = "v2h"
     path = None
     if argv[0] in ("genbasis", "valid"):
@@ -505,6 +515,16 @@ def main(argv=None, *, validation_only=False):
             argv = ["mlh.toml"] if Path("mlh.toml").is_file() else ["convert", "."]
         elif entry.config is None:
             argv = ["basis-generate", "basis.h5", "--potcar", "POTCAR"]
+        elif Path(entry.config).is_dir():
+            directory = Path(entry.config)
+            if program == "v2h_valid":
+                argv = (
+                    [str(directory / "mlh.toml")]
+                    if (directory / "mlh.toml").is_file()
+                    else ["convert", str(directory)]
+                )
+            else:
+                argv = ["basis-generate", str(directory / "basis.h5"), "--potcar", str(directory / "POTCAR")]
         elif Path(entry.config).suffix.lower() in (".json", ".toml"):
             argv = [entry.config]
         else:
@@ -515,8 +535,26 @@ def main(argv=None, *, validation_only=False):
             if len(argv) == 1 and Path(argv[0]).suffix.lower() in (".json", ".toml"):
                 path = Path(argv[0]).resolve()
                 config = load_config(path)
+                if config.get("command") == "auto":
+                    config.pop("command")
+                inferred = (
+                    "basis-generate"
+                    if program == "v2h_genbasis"
+                    else ("convert-batch" if "jobs" in config else "convert")
+                )
+                command = config.get("command", inferred)
+                if (
+                    command in ("convert", "basis-generate")
+                    and "parameters" not in config
+                ):
+                    reserved = {"command", "runtime"}
+                    config = {
+                        **{k: v for k, v in config.items() if k in reserved},
+                        "parameters": {
+                            k: v for k, v in config.items() if k not in reserved
+                        },
+                    }
                 if program == "v2h_genbasis":
-                    command = config.get("command", "basis-generate")
                     if command != "basis-generate":
                         raise ValueError("Expected a basis-generate configuration")
                     params = config.get("parameters", {})
@@ -527,8 +565,6 @@ def main(argv=None, *, validation_only=False):
                         "potcar": ["POTCAR"],
                         **params,
                     }
-                else:
-                    command = config.get("command", "convert-batch")
                 if program == "v2h_valid" and command != "convert":
                     raise ValueError(
                         "Expected a single-structure convert configuration"
@@ -580,7 +616,7 @@ def main(argv=None, *, validation_only=False):
                 if "threads" not in settings:
                     stack.enter_context(threadpool_limits(limits=1))
                 execute(parser, args)
-                method = args.method + (
+                method = (COMPACT_METHOD if args.method == "auto" else args.method) + (
                     " (legacy)" if args.method == NATIVE_METHOD else ""
                 )
                 print(f"AO basis ({method}): {Path(args.output).resolve()}")
@@ -630,7 +666,11 @@ def execute(parser, args):
     elif args.command == "basis-generate":
         from .atomic import generate
 
-        generate(args.output, args.potcar, args.layout, args.method)
+        if args.format == "auto" and args.nao_max is not None:
+            args.format = "hamgnn"
+        if args.nao_max is not None and args.format != "hamgnn":
+            raise ValueError("nao_max applies to HamGNN")
+        generate(args.output, args.potcar, args.layout, COMPACT_METHOD if args.method == "auto" else args.method, **({"hamgnn_layout": True, "nao": args.nao_max} if args.format == "hamgnn" else {}))
     elif args.command == "basis-optimize":
         from .spillage import optimize
 

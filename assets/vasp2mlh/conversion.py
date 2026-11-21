@@ -17,6 +17,8 @@ def require_file(path, hint):
 
 
 def convert_sample(args):
+    if args.format == "auto":
+        args.format = "hamgnn" if args.nao_max is not None else "deeph"
     run = Path(args.run).resolve()
     potential = Path(args.potential_run) if args.potential_run else run
     output = Path(args.output_dir) if args.output_dir else run / "mlh"
@@ -51,7 +53,23 @@ def convert_sample(args):
         result.mkdir()
         if needs_basis:
             registry = result / "basis.h5"
-            generate(registry, [run / "POTCAR"])
+            generate(
+                registry,
+                [run / "POTCAR"],
+                **(
+                    {"hamgnn_layout": True, "nao": args.nao_max}
+                    if args.format == "hamgnn"
+                    else {}
+                ),
+            )
+        if not needs_basis and args.format == "hamgnn":
+            from .basis import read_potcar
+            from .registry import read_registry
+            from .export import hamgnn_layout
+
+            pots = read_potcar(run / "POTCAR")
+            shells = read_registry(registry, pots, pots)
+            args.nao_max, _ = hamgnn_layout({s: [sh.l for sh in values] for s, values in shells.items()}, args.nao_max)
         window = args.energy_window
         if window is None and args.band_range is None:
             window = list(DEFAULT_ENERGY_WINDOW)
@@ -84,12 +102,14 @@ def convert_sample(args):
             deeph(model, result / sample, registry)
         else:
             sample = Path("graph_data.npz")
-            hamgnn([model], result / sample, args.nao_max or 14, registry)
+            report["nao_max"] = hamgnn([model], result / sample, args.nao_max, registry)
+        report["export_format"] = args.format
+        report["basis_origin"] = "generated" if needs_basis else "frozen_registry"
         (result / "source_validation.json").write_text(
             json.dumps(report, indent=2, allow_nan=False) + "\n"
         )
         result.rename(output)
         bar.update(1)
     if report.get("screened_hybrid_maturity") == "beta":
-        print(f"HSE reconstruction: {report.get('completion_method', 'screened hybrid')} (beta)")
+        print(f"HSE reconstruction: {report['completion_method']} / {report.get('retained_policy', 'global-buffer-1')} (beta)")
     print(f"{args.format} sample: {(output / sample).absolute()}")

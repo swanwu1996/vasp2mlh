@@ -91,7 +91,7 @@ def verify_summary_snapshot(summary, models):
         raise ValueError("Batch changed during dataset export")
 
 
-def deeph_batch(models, destination, registry):
+def deeph_batch(models, destination, registry=None):
     """Export a checked cohort as numbered DeepH samples, atomically."""
     dest = Path(destination)
     models, summary = batch_inputs(models, dest)
@@ -126,6 +126,67 @@ def deeph_batch(models, destination, registry):
 OPENMX_ORDER = {0: [0], 1: [2, 0, 1], 2: [2, 4, 0, 3, 1], 3: [3, 4, 2, 5, 1, 6, 0]}
 
 
+def upstream_masks():
+    try:
+        from DFT_interfaces.openmx.utils import basis_def_14, basis_def_19, basis_def_26
+    except ImportError as exc:
+        raise ValueError(
+            "HamGNN export needs the upstream orbital masks in the hamgnn-gpu Conda environment"
+        ) from exc
+    return {14: basis_def_14, 19: basis_def_19, 26: basis_def_26}
+
+
+def mask_shells(nao, mask):
+    dims = (
+        [1] * 3 + [3] * 2 + [5] * (1 if nao == 14 else 2) + ([7] if nao == 26 else [])
+    )
+    start = 0
+    shell_list = []
+    active = set(mask)
+    for dim in dims:
+        block = set(range(start, start + dim))
+        if block & active:
+            if not block <= active:
+                raise ValueError("Incomplete shell in upstream HamGNN mask")
+            shell_list.append((dim - 1) // 2)
+        start += dim
+    return shell_list
+
+
+def hamgnn_layout(shells, nao=None, *, extend=False):
+    """Choose one upstream template across every species of a sample or cohort."""
+    from ase.data import atomic_numbers
+
+    templates = upstream_masks()
+    matches = []
+    for size in templates if nao is None else (nao,):
+        layout = {}
+        cost = 0
+        for sym, source in shells.items():
+            mask = templates[size].get(atomic_numbers[sym])
+            if mask is None:
+                break
+            expected = mask_shells(size, mask)
+            if expected != source:
+                if not extend or any(
+                    expected.count(l) < source.count(l) for l in set(source)
+                ):
+                    break
+                cost += sum(2 * l + 1 for l in expected) - sum(
+                    2 * l + 1 for l in source
+                )
+            layout[sym] = expected
+        else:
+            matches.append((cost, size, layout))
+    if not matches:
+        raise ValueError(
+            f"No compatible HamGNN orbital mask for {shells} with nao_max={nao or 'auto'}. "
+            "Use a compatible frozen registry, or generate one with v2h_genbasis and format='hamgnn'."
+        )
+    _, size, layout = min(matches, key=lambda item: item[:2])
+    return size, layout
+
+
 def ham_graph(f, nao):
     import torch
     from torch_geometric.data import Data
@@ -147,27 +208,15 @@ def ham_graph(f, nao):
     masks = {14: basis_def_14, 19: basis_def_19, 26: basis_def_26}[nao]
     atoms = structure(f)
     ls = json.loads(f.attrs["shells"])
-    dims = (
-        [1] * 3 + [3] * 2 + [5] * (1 if nao == 14 else 2) + ([7] if nao == 26 else [])
-    )
-    starts = np.r_[0, np.cumsum(dims)]
     orders = []
     for atom in atoms:
         mask = masks.get(atom.number)
         if mask is None:
             raise ValueError(f"No upstream OpenMX {nao}-orbital mask for {atom.symbol}")
-        active = set(mask)
-        expected, order = [], []
-        for start, dim in zip(starts, dims):
-            slots = set(range(start, start + dim))
-            if active & slots:
-                if not slots <= active:
-                    raise ValueError(
-                        f"Incomplete shell in upstream mask for {atom.symbol}"
-                    )
-                l = (dim - 1) // 2
-                order.extend(len(order) + np.array(OPENMX_ORDER[l]))
-                expected.append(l)
+        expected = mask_shells(nao, mask)
+        order = []
+        for l in expected:
+            order.extend(len(order) + np.array(OPENMX_ORDER[l]))
         if ls[atom.symbol] != expected:
             raise ValueError(
                 f"HamGNN nao_max={nao} expects shells {expected} for {atom.symbol}"
@@ -242,11 +291,16 @@ def ham_graph(f, nao):
     return graph
 
 
-def hamgnn(models, output, nao=14, registry=None):
+def hamgnn(models, output, nao=None, registry=None):
     models, summary = batch_inputs(models, output)
     if Path(output).is_symlink() or paths_collide(output, [*models, registry]):
         raise ValueError("HamGNN output collides with an input or symlink")
     reports = audit(models, registry, labels=True)
+    shells = {}
+    for path in models:
+        with h5py.File(path) as f:
+            shells.update(json.loads(f.attrs["shells"]))
+    nao, _ = hamgnn_layout(shells, nao)
     graphs = {}
     for i, (path, info) in enumerate(zip(models, reports)):
         with h5py.File(path) as f:
@@ -278,3 +332,4 @@ def hamgnn(models, output, nao=14, registry=None):
                         else native["k/points"][:8],
                     )
             verify_summary_snapshot(summary, models)
+    return nao

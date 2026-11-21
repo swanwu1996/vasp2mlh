@@ -8,7 +8,7 @@ from .operator_action import ActionUnavailable, audit as audit_action
 import h5py
 import numpy as np
 
-from .band_release import reference_data, score_window, pbe_input_hashes, resolve_pbe_run
+from .band_release import default_reference, reference_data, score_window, pbe_input_hashes, resolve_pbe_run
 from .configuration import DEFAULT_ENERGY_WINDOW
 from .pipeline import file_sha256, output_file, paths_collide
 from .vasp import spectral_mode, metadata, screened_hybrid_maturity
@@ -34,6 +34,19 @@ def validate_sample(args, config):
             raise ValueError(
                 f"Missing {model_path}. Run v2h with this configuration first."
             )
+        if args.format == "auto":
+            formats = [
+                fmt
+                for fmt, item in (
+                    ("deeph", output / "deeph/0"),
+                    ("hamgnn", output / "graph_data.npz"),
+                )
+                if item.exists()
+            ]
+            if len(formats) > 1:
+                raise ValueError("Both export formats exist; specify format")
+            args.format = formats[0] if formats else "deeph"
+            report["export_validation"]["format"] = args.format
         with h5py.File(model_path, "r") as model:
             # Older combined conversions kept source provenance in band_validation.
             group = (
@@ -50,8 +63,22 @@ def validate_sample(args, config):
             provenance.update(maturity)
             pbe_run = getattr(args, "pbe_run", None)
             method = getattr(args, "completion_method", None)
+            if method in ("locality-constrained", "spectral-ritz"):
+                recorded_method = provenance.get(
+                    "completion_method", model.attrs.get("hamiltonian_method")
+                )
+                accepted = {
+                    "locality-constrained": {"locality_constrained_paw"},
+                    "spectral-ritz": {"spinor_spectral_ritz", "hybrid_spectral_ritz"},
+                }
+                if recorded_method not in accepted[method]:
+                    raise ValueError("Completion method differs from the recorded conversion")
             policy = getattr(args, "retained_policy", None)
-            if policy != provenance.get("retained_policy"):
+            recorded = provenance.get(
+                "retained_policy",
+                "global-buffer-1" if "pbe_reference" in provenance else None,
+            )
+            if policy not in (None, "auto", recorded):
                 raise ValueError("Retained-band policy differs from the recorded conversion")
             if "pbe_reference" in provenance:
                 directory = resolve_pbe_run(src, run, pbe_run, method, policy)
@@ -65,15 +92,17 @@ def validate_sample(args, config):
                     )
             elif pbe_run is not None or method == "pbe-anchored-v1":
                 raise ValueError("This model was not built with the specified PBE anchor")
-            if spectral_mode(src) and not args.reference:
-                reference = run
+            if not args.reference:
+                reference = default_reference(src, run)
             ref, selected = reference_data(src, reference, provenance["input_sha256"])
             limits = (args.max_rmse, args.max_error)
             if not np.isfinite(limits).all() or min(limits) < 0:
                 raise ValueError("Use finite nonnegative band error limits")
             window = args.energy_window
             if args.band_range is None and window is None:
-                window = list(DEFAULT_ENERGY_WINDOW)
+                args.band_range = provenance.get("band_range_1based")
+                if args.band_range is None:
+                    window = provenance.get("energy_window_from_source_fermi_eV") or list(DEFAULT_ENERGY_WINDOW)
             absolute = None
             if window is not None:
                 if not np.isfinite(window).all() or window[0] >= window[1]:

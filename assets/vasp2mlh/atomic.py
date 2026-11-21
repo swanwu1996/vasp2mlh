@@ -76,7 +76,17 @@ NATIVE_METHOD = "paw-native-v1"
 DEFAULT_LAYOUT = Path(__file__).with_name("compact-defaults-v1.toml")
 
 
-def generate(output, potcars, layout_file=None, method=COMPACT_METHOD):
+def generate(
+    output,
+    potcars,
+    layout_file=None,
+    method=COMPACT_METHOD,
+    *,
+    hamgnn_layout=False,
+    nao=None,
+):
+    if method == "auto":
+        method = COMPACT_METHOD
     if method not in (COMPACT_METHOD, NATIVE_METHOD):
         raise ValueError(f"Unknown AO generation method: {method}")
     if layout_file and method == NATIVE_METHOD:
@@ -112,6 +122,20 @@ def generate(output, potcars, layout_file=None, method=COMPACT_METHOD):
                 "cutoff_A": min(recipe["cutoff_A"], float(pot.grid[-1])),
             }
         preset = DEFAULT_LAYOUT.stem
+    if hamgnn_layout and layout is not None:
+        from .export import hamgnn_layout as select_layout
+
+        shells = {
+            sym: [l for l, n in enumerate(recipe["multiplicities"]) for _ in range(n)]
+            for sym, recipe in layout.items()
+        }
+        size, compatible = select_layout(shells, nao, extend=layout_file is None)
+        if layout_file is None:
+            for sym, ls in compatible.items():
+                layout[sym]["multiplicities"] = [
+                    ls.count(l) for l in range(max(ls) + 1)
+                ]
+            preset = f"{DEFAULT_LAYOUT.stem}/hamgnn-{size}"
     basis = {}
     for sym in sorted(pots if layout is None else layout):
         pot = pots[sym]
@@ -124,6 +148,10 @@ def generate(output, potcars, layout_file=None, method=COMPACT_METHOD):
             ]
         else:
             basis[sym] = compact_shells(pot, layout[sym])
+    if hamgnn_layout and layout is None:
+        from .export import hamgnn_layout as select_layout
+
+        select_layout({sym: [sh.l for sh in orbitals] for sym, orbitals in basis.items()}, nao)
     write_registry(
         basis,
         output,

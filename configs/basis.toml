@@ -1,8 +1,5 @@
-# Run: v2h_genbasis basis.toml
-# With no argument: ./POTCAR -> ./basis.h5, using the built-in compact element layouts.
-command = "basis-generate"
-[parameters]
-potcar = ["POTCAR"]  # paths relative to this file
-output = "basis.h5"
-method = "paw-compact-v1"  # default; use "paw-native-v1" for the legacy baseline
-# layout = "layout.toml"  # optional replacement element layout for compact orbitals
+# v2h_genbasis basis.toml: POTCAR -> basis.h5 using paw-compact-v1.
+# format = "hamgnn"  # choose shells compatible with the upstream orbital masks
+# potcar = ["POTCAR"]
+# output = "basis.h5"
+# layout = "layout.toml"

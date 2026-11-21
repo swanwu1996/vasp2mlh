@@ -40,6 +40,18 @@ class SingleConversionTests(unittest.TestCase):
             finally:
                 os.chdir(previous)
 
+    def test_flat_config_infers_operation_and_anchors_default_run(self):
+        with TemporaryDirectory() as folder:
+            path = Path(folder) / "mlh.toml"
+            path.write_text('format="hamgnn"')
+            with patch("vasp2mlh.cli.execute") as execute:
+                main([folder])
+                args = execute.call_args.args[1]
+                self.assertEqual(
+                    (args.command, args.run, args.format), ("convert", folder, "hamgnn")
+                )
+                self.assertIsNone(args.nao_max)
+
     def test_empty_wavecar_reports_vasp_setting(self):
         with TemporaryDirectory() as temp:
             run = Path(temp)
