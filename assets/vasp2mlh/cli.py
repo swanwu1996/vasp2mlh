@@ -9,7 +9,7 @@ from xml.etree.ElementTree import ParseError
 import h5py
 import numpy as np
 
-from .configuration import BOUNDED_COLLINEAR
+from .configuration import BOUNDED_COLLINEAR, SCALAR_POLAR
 from .atomic import COMPACT_METHOD, NATIVE_METHOD
 from .comparison import compare_path, write_comparison
 from .analysis import held_out, locality, lobster_summary, spectra
@@ -203,9 +203,9 @@ def make_parser():
         operation.add_argument("--pbe-run", help="denser matching PBE SCF directory for scalar HSE (default: RUN/pbe)")
         operation.add_argument(
             "--completion-method",
-            choices=("auto", "spectral-ritz", "locality-constrained", "pbe-anchored-v1", BOUNDED_COLLINEAR),
+            choices=("auto", "spectral-ritz", "locality-constrained", "pbe-anchored-v1", BOUNDED_COLLINEAR, SCALAR_POLAR),
             default=None,
-            help="automatic from VASP XML: scalar HSE uses pbe-anchored-v1 (beta); scalar/collinear DFT+U reads the full PAW strengths; collinear-window-ritz-v1 is an optional bounded method for two semilocal spin channels",
+            help="automatic from VASP XML: scalar HSE uses pbe-anchored-v1 (beta); scalar/collinear DFT+U reads the full PAW strengths; collinear-window-ritz-v1 is an optional bounded method for two semilocal spin channels. scalar-polar-window-v1 anchors an ordered nonmagnetic semilocal band range (experimental)",
         )
         operation.add_argument(
             "--centre-offset",

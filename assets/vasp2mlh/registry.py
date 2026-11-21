@@ -7,7 +7,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-from .configuration import BOUNDED_COLLINEAR, load_config
+from .configuration import BOUNDED_COLLINEAR, SCALAR_POLAR, load_config
 from .basis import Shell, load_basis, read_potcar
 from .pipeline import output_file
 from .realspace import SPARSE_FORMAT, structure
@@ -234,14 +234,14 @@ def label_definition(f):
     if method in {"hybrid_spectral_ritz", "spinor_spectral_ritz"}:
         settings.pop("complement_eV")
         settings["complement_policy"] = attrs["complement_policy"]
-    if method in {BOUNDED_COLLINEAR, "hubbard-paw-ritz-v1", "filtered_paw_ritz", "hybrid_spectral_ritz", "spinor_spectral_ritz"}:
+    if method in {SCALAR_POLAR, BOUNDED_COLLINEAR, "hubbard-paw-ritz-v1", "filtered_paw_ritz", "hybrid_spectral_ritz", "spinor_spectral_ritz"}:
         for key in ("filter_width_eV", "filter_floor", "filter_taper_eV"):
             settings[key] = float(attrs[key])
         settings["centre_offset_eV"] = round(
             float(attrs["filter_centre_eV"] - attrs["fermi_eV"]), 10
         )
-    recipe_key = "collinear_recipe" if method == BOUNDED_COLLINEAR else "hubbard_recipe"
-    if recipe_key in attrs or method in {"hubbard-paw-ritz-v1", BOUNDED_COLLINEAR}:
+    recipe_key = {BOUNDED_COLLINEAR: "collinear_recipe", SCALAR_POLAR: "polar_recipe"}.get(method, "hubbard_recipe")
+    if recipe_key in attrs or method in {"hubbard-paw-ritz-v1", BOUNDED_COLLINEAR, SCALAR_POLAR}:
         recipe = json.loads(attrs[recipe_key])
         limit = recipe.pop("linear_through_eV")
         target = recipe["energy_window_from_fermi_eV"]

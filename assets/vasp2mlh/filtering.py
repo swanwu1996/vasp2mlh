@@ -8,11 +8,15 @@ import numpy as np
 from scipy.linalg import block_diag, eigh
 from scipy.special import expit
 
-from .configuration import BOUNDED_COLLINEAR
+from .configuration import BOUNDED_COLLINEAR, SCALAR_POLAR
+from .spillage import complete_multiplets
 from .calibrate import metric_factors, ordinary_geometry, write_ordinary
 from .model import adjoint, spin_rotation
 from .pipeline import file_sha256, output_file
 from .vasp import is_hybrid
+
+
+MIN_POLAR_SINGULAR_VALUE = 1e-6
 
 
 def bound_hubbard_spectrum(h, recipe):
@@ -23,6 +27,24 @@ def bound_hubbard_spectrum(h, recipe):
     high = values > edge
     values[high] = edge + width * np.tanh((values[high] - edge) / width)
     return (vectors * values[..., None, :]) @ adjoint(vectors)
+
+
+def anchor_polar_window(prior, projections, energies, band_range):
+    """Impose native eigenpairs on the closest orthonormal bare PAW target frame."""
+    first, last = band_range
+    if not 1 <= first <= last <= min(len(prior), len(energies)):
+        raise ValueError("Polar window exceeds the ordered AO or VASP spectrum")
+    edge = complete_multiplets(energies, first - 1, last)
+    if edge.stop == len(energies):
+        raise ValueError("Increase NBANDS to resolve the upper polar-window multiplet")
+    columns = projections[:, edge]
+    left, singular, right = np.linalg.svd(columns, full_matrices=False)
+    if len(singular) < columns.shape[1] or singular[-1] < MIN_POLAR_SINGULAR_VALUE:
+        raise ValueError("Polar-window PAW projection is rank deficient")
+    frame = left @ right
+    complement = np.eye(len(prior)) - frame @ adjoint(frame)
+    anchored = (frame * energies[edge]) @ adjoint(frame) + complement @ prior @ complement
+    return (anchored + adjoint(anchored)) / 2
 
 
 def upper_taper(energies, ceiling, taper):
@@ -67,7 +89,7 @@ def filtered_operator(
 
 
 def filter_model(
-    model, overlap, output, centre_offset, width, floor, taper, *, spectral=False, hubbard_recipe=None, collinear_recipe=None
+    model, overlap, output, centre_offset, width, floor, taper, *, spectral=False, hubbard_recipe=None, collinear_recipe=None, polar_recipe=None
 ):
     if Path(output).resolve() in {Path(p).resolve() for p in (model, overlap)}:
         raise ValueError("Choose a separate output")
@@ -96,7 +118,13 @@ def filter_model(
             or src["k/H"].shape[0] != 2 or spectral or hubbard_recipe is not None
         ):
             raise ValueError("A collinear window requires a two-channel direct semilocal operator")
-        bound = collinear_recipe if collinear_recipe is not None else hubbard_recipe
+        if polar_recipe is not None and (
+            src.attrs.get("hamiltonian_method") != "direct_scalar_paw"
+            or src["k/H"].shape[0] != 1 or src.attrs.get("spinor", False)
+            or spectral or hubbard_recipe is not None or collinear_recipe is not None
+        ):
+            raise ValueError("A scalar polar window requires a nonmagnetic semilocal operator")
+        bound = polar_recipe or collinear_recipe or hubbard_recipe
         spinor = bool(src.attrs.get("spinor", False))
         if (
             spectral
@@ -162,6 +190,11 @@ def filter_model(
                     )
                     if bound is not None:
                         effective = bound_hubbard_spectrum(effective, bound)
+                    if polar_recipe is not None:
+                        try:
+                            effective = anchor_polar_window(effective, v, energy, polar_recipe["band_range_1based"])
+                        except ValueError as exc:
+                            raise ValueError(f"{exc} at k={k[i].tolist()}") from exc
                     hnew[spin, i] = root @ effective @ root
                     # Preserve the bare AO projection convention of ordinary-metric archives.
                     out["k/projection"][spin, i] = root @ v
@@ -187,7 +220,10 @@ def filter_model(
                 overlap_sha256=file_sha256(overlap),
             )
 
-            if collinear_recipe is not None:
+            if polar_recipe is not None:
+                out.attrs["hamiltonian_method"] = SCALAR_POLAR
+                out.attrs["polar_recipe"] = json.dumps(polar_recipe)
+            elif collinear_recipe is not None:
                 out.attrs["hamiltonian_method"] = BOUNDED_COLLINEAR
                 out.attrs["collinear_recipe"] = json.dumps(collinear_recipe)
             elif hubbard_recipe is not None:

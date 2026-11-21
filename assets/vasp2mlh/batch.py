@@ -22,6 +22,7 @@ from .basis import radial_backend
 from .configuration import (
     BATCH_CONTROLS,
     BOUNDED_COLLINEAR,
+    SCALAR_POLAR,
     DEFAULT_ENERGY_WINDOW,
     backend_setting,
     load_config,
@@ -29,7 +30,7 @@ from .configuration import (
 )
 from .pipeline import build, file_sha256, output_file, projection_header
 from .operator import check_potential_records, check_potential_source
-from .vasp import spectral_mode, metadata
+from .vasp import is_hubbard, spectral_mode, metadata
 from xml.etree.ElementTree import ParseError
 from .realspace import SPARSE_FORMAT
 from .progress import progress_bar
@@ -182,7 +183,7 @@ def read_jobs(manifest, config=None):
                 if value not in ("window-first-buffer-2", "global-buffer-1"):
                     raise ValueError(f"Unknown retained policy for job {label}")
             elif key == "completion_method":
-                choices = ((BOUNDED_COLLINEAR,) if mode == "validated"
+                choices = ((BOUNDED_COLLINEAR, SCALAR_POLAR) if mode == "validated"
                            else ("spectral-ritz", "locality-constrained", "pbe-anchored-v1"))
                 if value not in choices:
                     raise ValueError(f"Invalid completion method for job {label}")
@@ -502,8 +503,10 @@ def preflight(job):
                 f"Batch mode {job['mode']} disagrees with source mode {spectral_mode(src) or 'validated'}"
             )
         check_source(src, run)
+        if job["options"].get("completion_method") == SCALAR_POLAR:
+            if src["nspin"] != 1 or is_hubbard(src) or "band_range" not in job["options"]:
+                raise ValueError(f"{SCALAR_POLAR} requires nonmagnetic semilocal data and an ordered band range")
         if job["options"].get("completion_method") == BOUNDED_COLLINEAR:
-            from .vasp import is_hubbard
             if src["nspin"] != 2 or is_hubbard(src) or "energy_window" not in job["options"]:
                 raise ValueError(f"{BOUNDED_COLLINEAR} requires collinear semilocal data without U and an energy window")
     wave, _ = projection_header(run, src, job["options"].get("mesh"))

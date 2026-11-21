@@ -14,14 +14,14 @@ from ase.io import read, write
 
 from . import __version__
 from .comparison import periodic_match
-from .configuration import BOUNDED_COLLINEAR
-from .filtering import filter_model
+from .configuration import BOUNDED_COLLINEAR, SCALAR_POLAR
+from .filtering import MIN_POLAR_SINGULAR_VALUE, filter_model
 from .locality import locality_model, PBE_ANCHORED, PRIOR_OFFSET_EV, WINDOW_FIRST_BUFFER
 from .overlap import overlap
 from .pipeline import bands, build, file_sha256, output_file, projection_header
 from .registry import fingerprint, inspect_basis, read_registry
 from .sparse import sparsify
-from .spillage import basis_quality
+from .spillage import DEGENERACY_EV, basis_quality
 from .vasp import check_hubbard, is_hubbard, is_hybrid, spectral_mode, metadata, screened_hybrid_maturity, split_mesh
 
 
@@ -604,8 +604,9 @@ def reconstruct(
     xml_hash = file_sha256(run / "vasprun.xml")
     src = metadata(run / "vasprun.xml")
     check_source(src, run)
+    polar_window = completion_method == SCALAR_POLAR
     if cutoff is None:
-        cutoff = 18.0 if is_hubbard(src) or completion_method == BOUNDED_COLLINEAR else 12.0
+        cutoff = 18.0 if is_hubbard(src) or polar_window or completion_method == BOUNDED_COLLINEAR else 12.0
     pbe_dir = resolve_pbe_run(src, run, pbe_run, completion_method, retained_policy)
     if completion_method == "auto":
         completion_method = None
@@ -640,15 +641,17 @@ def reconstruct(
             "Spectral projection uses the source WAVECAR; omit potential_run"
         )
     bounded_collinear = completion_method == BOUNDED_COLLINEAR
+    if polar_window and (src["nspin"] != 1 or mode or is_hubbard(src) or band_range is None):
+        raise ValueError(f"{SCALAR_POLAR} requires a nonmagnetic semilocal source and an ordered band range")
     if bounded_collinear and (src["nspin"] != 2 or mode or is_hubbard(src) or energy_window is None):
         raise ValueError(f"{BOUNDED_COLLINEAR} requires two collinear semilocal channels without U and an energy window")
-    if completion_method not in (None, PBE_ANCHORED, BOUNDED_COLLINEAR, "spectral-ritz", "locality-constrained"):
+    if completion_method not in (None, PBE_ANCHORED, BOUNDED_COLLINEAR, SCALAR_POLAR, "spectral-ritz", "locality-constrained"):
         raise ValueError(f"Unknown completion method {completion_method}")
     auto_centre = centre_offset is None
     if auto_centre:
         centre_offset = 6.0
     localized = mode is not None and completion_method != "spectral-ritz"
-    if completion_method is not None and mode is None and not bounded_collinear:
+    if completion_method is not None and mode is None and not (bounded_collinear or polar_window):
         raise ValueError(
             "Choosing a completion method requires a hybrid or noncollinear source"
         )
@@ -657,13 +660,13 @@ def reconstruct(
     ):
         raise ValueError("Set completion_method='spectral-ritz' to use Ritz filter controls")
     if floor is None:
-        floor = 0.0001 if mode or bounded_collinear else 0.005
+        floor = 0.0001 if mode or bounded_collinear or polar_window else 0.005
     if pbe_dir is not None:
         pbe_hashes = pbe_input_hashes(pbe_dir)
         pbe = check_pbe_pair(src, run, pbe_dir, mesh)
     inputs_for_hash = ("POTCAR", "WAVECAR") if mode else ("POTCAR", "CHGCAR")
     hashes = {name: file_sha256(run / name) for name in inputs_for_hash}
-    if not mode and (is_hubbard(src) or src["nspin"] == 2):
+    if not mode and (is_hubbard(src) or src["nspin"] == 2 or polar_window):
         hashes.update(WAVECAR=file_sha256(run / "WAVECAR"), potential_h5=file_sha256(potential / "vaspout.h5"))
     if reference is not None:
         ref, selected = reference_data(src, reference, hashes)
@@ -691,7 +694,7 @@ def reconstruct(
     ):
         raise ValueError("Source VASP spectrum must extend above the energy window")
     window_recipe = None
-    if is_hubbard(src) or bounded_collinear:
+    if is_hubbard(src) or bounded_collinear or polar_window:
         upper = (
             abs_window[1]
             if abs_window is not None
@@ -705,7 +708,9 @@ def reconstruct(
             upper_buffer_eV=2.0,
             saturation_width_eV=2.0,
         )
-        if auto_centre and mode is None:
+        if polar_window:
+            window_recipe.update(method=SCALAR_POLAR, degeneracy_eV=DEGENERACY_EV, min_singular_value=MIN_POLAR_SINGULAR_VALUE)
+        elif auto_centre and mode is None:
             centre_offset = max(6.0, upper + 2.0 - src["efermi"])
             window_recipe["filter_centre_policy"] = "max-fermi-plus-6-or-target-plus-2"
     if not mode and src["efermi"] + centre_offset > float(src["eig"][:, :, -1].min()) + 1e-4:
@@ -800,6 +805,7 @@ def reconstruct(
                 spectral=bool(mode),
                 hubbard_recipe=window_recipe if is_hubbard(src) else None,
                 collinear_recipe=window_recipe if bounded_collinear else None,
+                polar_recipe=window_recipe if polar_window else None,
             )
         if on_stage is not None:
             on_stage("Sparsify H(R)")
@@ -940,6 +946,8 @@ def reconstruct(
                     paw_rayleigh_max_eV=float(np.max(model["k/operator_edge_rayleigh_error_eV"])),
                     paw_residual_max_eV=float(np.max(model["k/operator_edge_residual_norm_eV"])),
                 )
+            if polar_window:
+                report.update(polar_recipe=window_recipe, polar_maturity="experimental")
             if bounded_collinear:
                 report["collinear_recipe"] = window_recipe
             report["completion_method"] = str(model.attrs["hamiltonian_method"])

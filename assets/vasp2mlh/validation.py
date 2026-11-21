@@ -9,7 +9,7 @@ import h5py
 import numpy as np
 
 from .band_release import default_reference, reference_data, score_window, pbe_input_hashes, resolve_pbe_run
-from .configuration import BOUNDED_COLLINEAR, DEFAULT_ENERGY_WINDOW
+from .configuration import BOUNDED_COLLINEAR, DEFAULT_ENERGY_WINDOW, SCALAR_POLAR
 from .pipeline import file_sha256, output_file, paths_collide
 from .vasp import metadata, screened_hybrid_maturity
 
@@ -82,11 +82,12 @@ def validate_sample(args, config):
             provenance.update(maturity)
             pbe_run = getattr(args, "pbe_run", None)
             method = getattr(args, "completion_method", None)
-            if method in ("locality-constrained", "spectral-ritz", BOUNDED_COLLINEAR):
+            if method in ("locality-constrained", "spectral-ritz", BOUNDED_COLLINEAR, SCALAR_POLAR):
                 recorded_method = provenance.get(
                     "completion_method", model.attrs.get("hamiltonian_method")
                 )
                 accepted = {
+                    SCALAR_POLAR: {SCALAR_POLAR},
                     BOUNDED_COLLINEAR: {BOUNDED_COLLINEAR},
                     "locality-constrained": {"locality_constrained_paw"},
                     "spectral-ritz": {"spinor_spectral_ritz", "hybrid_spectral_ritz"},
@@ -138,7 +139,7 @@ def validate_sample(args, config):
                         "Energy window bounds must be finite and increasing"
                     )
                 absolute = (np.asarray(window) + src["efermi"]).tolist()
-            bound = provenance.get("collinear_recipe") or provenance.get("hubbard_recipe")
+            bound = provenance.get("polar_recipe") or provenance.get("collinear_recipe") or provenance.get("hubbard_recipe")
             if bound is not None:
                 if absolute is not None:
                     top = absolute[1]
