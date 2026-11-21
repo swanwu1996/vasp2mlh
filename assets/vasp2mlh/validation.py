@@ -3,6 +3,7 @@
 import json
 from pathlib import Path
 from .readback import verify_export
+from .operator_action import ActionUnavailable, audit as audit_action
 
 import h5py
 import numpy as np
@@ -49,8 +50,11 @@ def validate_sample(args, config):
             provenance.update(maturity)
             pbe_run = getattr(args, "pbe_run", None)
             method = getattr(args, "completion_method", None)
+            policy = getattr(args, "retained_policy", None)
+            if policy != provenance.get("retained_policy"):
+                raise ValueError("Retained-band policy differs from the recorded conversion")
             if "pbe_reference" in provenance:
-                directory = resolve_pbe_run(src, run, pbe_run, method)
+                directory = resolve_pbe_run(src, run, pbe_run, method, policy)
                 if (
                     directory is None
                     or pbe_input_hashes(directory)
@@ -125,6 +129,26 @@ def validate_sample(args, config):
             report["export_validation"] = verify_export(
                 output, args.format, model, ref["kpoints"][selected], args.nao_max
             )
+            action_run = run if spectral_mode(src) else reference
+            if spectral_mode(src) and "zero_weight" not in src:
+                action = {
+                    "status": "unavailable",
+                    "reason": "No independent zero-weight WAVECAR records in the source SCF",
+                }
+            elif (
+                not (action_run / "WAVECAR").is_file()
+                or (action_run / "WAVECAR").stat().st_size == 0
+            ):
+                action = {"status": "unavailable", "reason": "No independent WAVECAR"}
+            else:
+                try:
+                    result = audit_action(
+                        action_run, [model_path], window, args.band_range
+                    )
+                    action = {"status": "measured", **result[str(model_path)]}
+                except ActionUnavailable as exc:
+                    action = {"status": "unavailable", "reason": str(exc)}
+            report["operator_action"] = action
     except Exception as exc:
         report.update(status="failed", error=str(exc))
         if output.is_dir():

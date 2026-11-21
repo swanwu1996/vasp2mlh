@@ -11,6 +11,45 @@ except ModuleNotFoundError:  # Python 3.10
     import tomli as tomllib
 
 
+# File-valued arguments shared by the ordinary CLI and TOML/JSON operations.
+# Keep the leaf path intact so output symlinks can still be detected by writers.
+_CONFIG_PATH_FIELDS = {
+    "run",
+    "reference",
+    "potential_run",
+    "pbe_run",
+    "registry",
+    "output",
+    "output_dir",
+    "model",
+    "models",
+    "potcar",
+    "layout",
+    "config",
+    "basis_lock",
+    "basis",
+    "overlap",
+    "structure",
+    "check_points",
+    "lobsterout",
+    "reference_xml",
+    "points",
+    "destination",
+    "vasp_xml",
+    "openmx_band",
+    "comparisons",
+}
+
+
+def anchor_config_paths(args, directory):
+    for name in _CONFIG_PATH_FIELDS.intersection(vars(args)):
+        value = getattr(args, name)
+        if isinstance(value, list):
+            setattr(args, name, [str(directory / item) for item in value])
+        elif value is not None:
+            setattr(args, name, str(directory / value))
+
+
 def load_config(path):
     path = Path(path)
     with path.open("rb") as stream:
@@ -25,7 +64,7 @@ def load_config(path):
     return config
 
 
-BATCH_CONTROLS = {"workers", "threads", "backend", "check_only"}
+BATCH_CONTROLS = {"workers", "threads", "backend", "check_only", "fast_resume"}
 DEFAULT_ENERGY_WINDOW = (-1.0, 2.0)
 
 
@@ -47,7 +86,7 @@ def runtime_controls(config, batch):
     for name in ("threads", "workers"):
         if name in settings and (type(settings[name]) is not int or settings[name] < 1):
             raise ValueError(f"{name} must be a positive integer")
-    for key in ("check_only", "progress"):
+    for key in ("check_only", "progress", "fast_resume"):
         if key in settings and type(settings[key]) is not bool:
             raise ValueError(f"runtime.{key} must be true or false")
     settings.pop(

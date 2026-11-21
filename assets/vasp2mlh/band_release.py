@@ -1,6 +1,7 @@
 """Build and qualify a fixed-basis scalar band model against independent VASP energies."""
 
 import json
+import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -11,7 +12,7 @@ from ase.io import write
 from . import __version__
 from .comparison import periodic_match
 from .filtering import filter_model
-from .locality import locality_model, PBE_ANCHORED, PRIOR_OFFSET_EV
+from .locality import locality_model, PBE_ANCHORED, PRIOR_OFFSET_EV, WINDOW_FIRST_BUFFER
 from .overlap import overlap
 from .pipeline import bands, build, file_sha256, output_file, projection_header
 from .registry import fingerprint, inspect_basis, read_registry
@@ -260,9 +261,13 @@ def check_source(src, run):
         raise ValueError("Source must use ICHARG=11 or write its converged SCF density")
 
 
-def resolve_pbe_run(src, run, pbe_run, method):
+def resolve_pbe_run(src, run, pbe_run, method, retained_policy=None):
     """Route from the effective VASP parameters, never from a folder name."""
     screened = bool(screened_hybrid_maturity(src))
+    if retained_policy is not None and (
+        not screened or retained_policy != WINDOW_FIRST_BUFFER
+    ):
+        raise ValueError("window-first-buffer-2 requires a scalar screened PBE hybrid source")
     if not screened:
         if pbe_run is not None or method == PBE_ANCHORED:
             raise ValueError(
@@ -407,6 +412,7 @@ def reconstruct(
     pbe_run=None,
     relative_pruning=False,
     completion_method=None,
+    retained_policy=None,
     centre_offset=6.0,
     width=1.0,
     floor=None,
@@ -457,7 +463,7 @@ def reconstruct(
     xml_hash = file_sha256(run / "vasprun.xml")
     src = metadata(run / "vasprun.xml")
     check_source(src, run)
-    pbe_dir = resolve_pbe_run(src, run, pbe_run, completion_method)
+    pbe_dir = resolve_pbe_run(src, run, pbe_run, completion_method, retained_policy)
     mode = spectral_mode(src)
     if mode and potential.resolve() != run.resolve():
         raise ValueError(
@@ -521,7 +527,7 @@ def reconstruct(
             raise ValueError("Target window extends outside the retained spectrum")
     output.parent.mkdir(parents=True, exist_ok=True)
     with (
-        TemporaryDirectory(dir=output.parent) as scratch,
+        TemporaryDirectory(dir=os.environ.get("TMPDIR") or output.parent) as scratch,
         output_file(output) as candidate,
     ):
         d = Path(scratch)
@@ -567,6 +573,7 @@ def reconstruct(
                     pbe_model,
                     band_range,
                     energy_window,
+                    retained_policy=retained_policy,
                 )
             except ValueError as exc:
                 raise ValueError(f"PBE reference completion failed: {exc}") from exc
@@ -578,6 +585,7 @@ def reconstruct(
                 band_range,
                 energy_window,
                 pbe_model=pbe_model,
+                retained_policy=retained_policy,
             )
         else:
             filter_model(
@@ -709,6 +717,20 @@ def reconstruct(
                         alignment_eV=float(model.attrs["pbe_alignment_eV"]),
                     ),
                 )
+            if retained_policy is not None:
+                report["retained_policy"] = retained_policy
+                with h5py.File(pbe_model) as baseline:
+                    for target, stage in (
+                        (model, "locality_completion"),
+                        (baseline, "pbe_reference"),
+                    ):
+                        counts, frequencies = np.unique(
+                            target["locality/retained_by_k"][:], return_counts=True
+                        )
+                        report[stage]["retained_band_histogram"] = dict(
+                            zip(map(str, counts), map(int, frequencies))
+                        )
+                        report[stage]["min_retained_singular_value"] = float(np.sqrt(np.min(target["locality/min_retained_weight"][:])))
             if reference is None:
                 group = model.create_group("source_validation")
             else:

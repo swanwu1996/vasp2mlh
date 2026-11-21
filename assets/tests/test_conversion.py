@@ -29,10 +29,10 @@ class SingleConversionTests(unittest.TestCase):
                     self.assertEqual(execute.call_args.args[1].run, ".")
                     Path("mlh.toml").write_text('command="convert"\n[parameters]\nrun="mesh"')
                     main([])
-                    self.assertEqual(execute.call_args.args[1].run, "mesh")
+                    self.assertEqual(execute.call_args.args[1].run, str(Path("mesh").absolute()))
                 with patch("vasp2mlh.validation.validate_sample") as validate:
                     main(["valid"])
-                    self.assertEqual(validate.call_args.args[0].run, "mesh")
+                    self.assertEqual(validate.call_args.args[0].run, str(Path("mesh").absolute()))
                     self.assertEqual(validate.call_args.args[1], Path("mlh.toml").resolve())
                 with patch("vasp2mlh.atomic.generate") as generate:
                     main(["genbasis"])
@@ -164,7 +164,7 @@ class SingleConversionTests(unittest.TestCase):
                 'command="convert"\n[parameters]\nrun="."\noutput="old-name"\n'
             )
             main([str(cfg)])
-            self.assertEqual(execute.call_args.args[1].output_dir, "old-name")
+            self.assertEqual(execute.call_args.args[1].output_dir, str(cfg.parent / "old-name"))
             cfg.write_text(cfg.read_text() + 'output_dir="another-name"\n')
             with self.assertRaises(SystemExit):
                 main([str(cfg)])

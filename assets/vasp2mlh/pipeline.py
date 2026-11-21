@@ -67,8 +67,8 @@ def projection_header(run, meta, mesh):
     if (
         xml_e.shape != (w.ns, len(meta["kpoints"]), w.nb)
         or w.nk != meta.get("wave_nk", len(meta["kpoints"]))
-        or not np.allclose(w.cell, atoms.cell, atol=1e-7)
-        or not np.isclose(w.encut, meta["encut"])
+        or not np.allclose(w.cell, atoms.cell, atol=1e-7, rtol=0)
+        or not np.isclose(w.encut, meta["encut"], atol=1e-6, rtol=0)
         or meta["lreal"] not in ("F", ".FALSE.")
     ):
         raise ValueError(
@@ -77,12 +77,16 @@ def projection_header(run, meta, mesh):
     if meta["spinor"] and w.ns != 1:
         raise ValueError("Unexpected spinor record layout")
     k = meta["kpoints"]
+    mesh_hint = f"Source ISYM={meta.get('isym', 'unknown')}. Use a full uniform grid with ISYM=-1."
     if not np.allclose(meta["weights"], 1 / len(k), atol=1e-7, rtol=0):
-        raise ValueError("Fourier transform requires a uniformly weighted full mesh. Run VASP with ISYM=-1.")
+        raise ValueError(f"Unequal integration weights. {mesh_hint}")
     mesh = mesh if mesh is not None else meta["mesh"]
     if mesh is None:
         raise ValueError("Pass --mesh Nx Ny Nz for an explicit full k list")
-    mesh_indices(k, mesh)
+    try:
+        mesh_indices(k, mesh)
+    except ValueError as exc:
+        raise ValueError(f"{exc}. {mesh_hint}") from exc
     return w, mesh
 
 
@@ -199,6 +203,7 @@ def build(
             if on_kpoint is not None:
                 on_kpoint(ik + 1, len(k))
         if operator is not None:
+            f["k"].attrs["operator_edge_definition"] = "nominal_valence_edge: ceil(NELECT/2)"
             f["k/operator_edge_rayleigh_error_eV"] = rayleigh_error
             f["k/operator_edge_residual_norm_eV"] = residual_norm
             f.attrs["hamiltonian_method"] = "direct_scalar_paw"

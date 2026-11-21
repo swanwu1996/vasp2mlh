@@ -121,6 +121,16 @@ class ProjectionTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     Wavecar(path)
 
+    def test_legacy_wavecar_header_cannot_extend_into_the_next_record(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "WAVECAR"
+            with path.open("wb") as out:
+                np.array([128, 1, 45200], dtype="<f8").tofile(out)
+                out.seek(128)
+                np.array([1, 8, 400, *np.eye(3).ravel(), 0], dtype="<f8").tofile(out)
+            with self.assertRaisesRegex(ValueError, "224 bytes in a 128-byte record"):
+                Wavecar(path)
+
     def test_skew_cell_gvector_order(self):
         cell = np.array([[4, 0, 0], [3.9, 0.7, 0], [1.3, 0.6, 3.7]])
         k = np.array([-0.41, 0.42, 0.25])

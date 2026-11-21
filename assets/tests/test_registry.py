@@ -97,15 +97,20 @@ class RegistryTests(unittest.TestCase):
                 calls,
                 [
                     (
-                        folder.resolve(),
-                        ("basis.h5", ["POTCAR"], "layout.toml", "paw-compact-v1"),
+                        Path(temp),
+                        (
+                            str(folder.resolve() / "basis.h5"),
+                            [str(folder.resolve() / "POTCAR")],
+                            str(folder.resolve() / "layout.toml"),
+                            "paw-compact-v1",
+                        ),
                     )
                 ],
             )
             cfg.write_text('[parameters]\nmethod="paw-native-v1"')
             genbasis_main([str(cfg)])
             self.assertEqual(
-                calls[-1][1], ("basis.h5", ["POTCAR"], None, "paw-native-v1")
+                calls[-1][1], (str(folder.resolve() / "basis.h5"), [str(folder.resolve() / "POTCAR")], None, "paw-native-v1")
             )
             cfg.write_text('[parameters]\noutput="basis.toml"')
             with self.assertRaises(SystemExit):

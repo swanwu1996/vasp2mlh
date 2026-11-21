@@ -146,4 +146,4 @@ class ConfigurationTests(unittest.TestCase):
             ):
                 main([str(p)])
                 main(["validate", "original.h5"])
-            self.assertEqual(seen, [("input.h5", "auto"), ("original.h5", "scipy")])
+            self.assertEqual(seen, [(str(p.parent / "input.h5"), "auto"), ("original.h5", "scipy")])

@@ -1,5 +1,6 @@
 """Atom-pair blocks in the cell-periodic gauge. Spin channels stay explicit."""
 
+from functools import lru_cache
 import json
 
 import numpy as np
@@ -90,8 +91,13 @@ def matrices_k(f, k):
     dim = bounds[-1] * (1 + int(spinor))
     h = np.zeros((f.attrs["spin_channels"], len(k), dim, dim), complex)
     s = np.zeros((len(k), bounds[-1], bounds[-1]), complex)
+
+    @lru_cache(maxsize=128)
+    def translation_phase(x, y, z):
+        return np.exp(2j * np.pi * (k @ [x, y, z]))[:, None, None]
+
     for (x, y, z, i, j), hh, ss in pair_blocks(f):
-        phase = np.exp(2j * np.pi * (k @ [x, y, z]))[:, None, None]
+        phase = translation_phase(x, y, z)
         si, sj = slice(bounds[i], bounds[i + 1]), slice(bounds[j], bounds[j + 1])
         s[:, si, sj] += phase * ss
         # Each spin component is contiguous within a given atom block.

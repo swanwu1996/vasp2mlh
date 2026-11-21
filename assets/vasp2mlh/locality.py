@@ -14,6 +14,7 @@ from .model import adjoint, bloch, mesh_indices, spin_rotation
 from .pipeline import output_file, paths_collide
 
 PBE_ANCHORED = "pbe-anchored-v1"
+WINDOW_FIRST_BUFFER = "window-first-buffer-2"
 
 
 PRIOR_WEIGHT = 0.01
@@ -40,6 +41,69 @@ def retained_bands(energies, dimension, band_range, upper):
             "AO dimension or NBANDS cannot resolve the target and its buffer"
         )
     return count
+
+
+def retained_counts(energies, dimension, band_range, upper, policy):
+    if policy is None:
+        count = retained_bands(energies, dimension, band_range, upper)
+        return np.full(len(energies), count, dtype=int)
+    if policy != WINDOW_FIRST_BUFFER:
+        raise ValueError(f"Unknown retained-band policy {policy}")
+    top = (
+        band_range[1]
+        if band_range is not None
+        else int(np.max((energies <= upper).sum(axis=1)))
+    )
+    if top < 1:
+        raise ValueError("No VASP bands below the target energy window")
+    # The requested manifold is common to all k. Close just the boundary
+    # multiplet of the second buffer band at its own k point.
+    return np.array(
+        [retained_bands(row[None], dimension, (1, top + 1), None) for row in energies]
+    )
+
+
+def protected_intervals(energies, band_range, window):
+    """Close the target interval under same-k boundary degeneracies."""
+    intervals = []
+    for row in energies:
+        if band_range is not None:
+            lo, hi = band_range[0] - 1, band_range[1]
+        else:
+            lo = int(np.searchsorted(row, window[0], side="left"))
+            hi = int(np.searchsorted(row, window[1], side="right"))
+        if lo == hi:
+            intervals.append((0, 0))
+            continue
+        while lo > 0 and row[lo] - row[lo - 1] <= DEGENERACY_EV:
+            lo -= 1
+        while hi < len(row) and row[hi] - row[hi - 1] <= DEGENERACY_EV:
+            hi += 1
+        intervals.append((lo, hi))
+    return np.asarray(intervals)
+
+
+def window_first_frame(projections, joint, intervals):
+    """Polar target frame followed by the polar frame of its orthogonal remainder."""
+    count = projections.shape[-1]
+    for lo, hi in np.unique(intervals, axis=0):
+        if lo < 0 or hi > count or lo > hi:
+            raise ValueError("Protected multiplet extends outside the retained space")
+        if lo == hi or hi - lo == count:
+            continue
+        rows = np.flatnonzero((intervals == (lo, hi)).all(axis=1))
+        v = projections[rows]
+        left, _, right = np.linalg.svd(v[:, :, lo:hi], full_matrices=False)
+        target = left @ right
+        rest = np.r_[:lo, hi:count]
+        others = v[:, :, rest]
+        residual = others - target @ (adjoint(target) @ others)
+        left, _, right = np.linalg.svd(residual, full_matrices=False)
+        frame = np.empty_like(v)
+        frame[:, :, lo:hi] = target
+        frame[:, :, rest] = left @ right
+        joint[rows] = frame
+    return joint
 
 
 def neighbor_faces(cell, mesh):
@@ -80,7 +144,7 @@ def neighbor_faces(cell, mesh):
 
 
 def complete_subspace(
-    points, mesh, cell, orbital_positions, projections, energies, prior
+    points, mesh, cell, orbital_positions, projections, energies, prior, counts=None, protected=None
 ):
     """Solve for Hermitian h(k) with locked polar-projected eigenpairs Q,E.
 
@@ -88,28 +152,57 @@ def complete_subspace(
     is a gauge-transported nearest-neighbor Dirichlet energy plus a quadratic
     prior. Only source k points and their projections enter the solve.
     """
-    left, singular, right = np.linalg.svd(projections, full_matrices=False)
-    if np.min(singular) <= 1e-6:
-        raise ValueError("Rank-deficient PAW projection of retained bands")
-    q = left @ right
-    locked = (q * energies[:, None, :]) @ adjoint(q)
-    dim, count = q.shape[1:]
+    nk, dim, width = projections.shape
+    counts = np.full(nk, width) if counts is None else np.asarray(counts)
+    if counts.shape != (nk,) or np.any(counts < 1) or np.any(counts > min(width, dim)):
+        raise ValueError("Invalid retained-band counts for AO projections")
     scalar_prior = np.ndim(prior) == 0
-    if not np.isfinite(prior).all() or (scalar_prior and prior < np.max(energies) + COMPLEMENT_GAP_EV):
-        raise ValueError("Localized complement prior lies inside retained bands")
-    if count == dim:
-        return locked, singular[:, -1] ** 2, 0
-    z = np.linalg.qr(q, mode="complete")[0][:, :, count:]
-    zt = adjoint(z)
+    if not np.isfinite(prior).all():
+        raise ValueError("Non-finite localized complement prior")
+    weights = np.empty(nk)
+    groups = []
+    for count in np.unique(counts):
+        ix = np.flatnonzero(counts == count)
+        e = energies[ix, :count]
+        v = projections[ix, :, :count]
+        left, singular, right = np.linalg.svd(v, full_matrices=False)
+        worst = np.argmin(singular[:, -1])
+        if singular[worst, -1] <= 1e-6:
+            k = np.asarray(points)[ix[worst]].tolist()
+            raise ValueError(
+                f"Rank-deficient PAW projection at k={k}, bands 1-{count}, "
+                f"minimum singular value {singular[worst, -1]:.3g} (threshold 1e-6)"
+            )
+        q = left @ right
+        if protected is not None:
+            q = window_first_frame(v, q, protected[ix])
+        locked = (q * e[:, None, :]) @ adjoint(q)
+        z = np.linalg.qr(q, mode="complete")[0][:, :, count:]
+        floor = e[:, -1, None] + COMPLEMENT_GAP_EV
+        if z.shape[-1] and scalar_prior and prior < np.max(floor):
+            raise ValueError("Localized complement prior lies inside retained bands")
+        weights[ix] = singular[:, -1] ** 2
+        groups.append((ix, z, locked, floor))
     target = prior * np.eye(dim) if scalar_prior else prior
-    floor = energies[:, -1, None] + COMPLEMENT_GAP_EV
 
     def feasible(candidate):
-        ev, vec = np.linalg.eigh(zt @ candidate @ z)
-        frame = z @ vec
-        return locked + (frame * np.maximum(ev, floor)[:, None, :]) @ adjoint(frame)
+        projected = np.empty((nk, dim, dim), dtype=complex)
+        for ix, z, locked, floor in groups:
+            projected[ix] = locked
+            if z.shape[-1]:
+                block = (
+                    candidate if candidate.ndim == 2 or len(ix) == nk else candidate[ix]
+                )
+                ev, vec = np.linalg.eigh(adjoint(z) @ block @ z)
+                frame = z @ vec
+                projected[ix] += (frame * np.maximum(ev, floor)[:, None, :]) @ adjoint(
+                    frame
+                )
+        return projected
 
-    h = locked + prior * (z @ zt) if scalar_prior else feasible(target)
+    h = feasible(target)
+    if np.all(counts == dim):
+        return h, weights, 0
     ix = mesh_indices(points, mesh)
     lookup = {tuple(index): i for i, index in enumerate(ix)}
     neighbors = []
@@ -118,7 +211,7 @@ def complete_subspace(
         phase = np.exp(2j * np.pi * (orbital_positions @ (step / mesh)))
         neighbors.append((peer, weight * phase.conj()[:, None] * phase[None, :]))
     if not neighbors:
-        return h, singular[:, -1] ** 2, 0
+        return h, weights, 0
     # Hessian eigenvalues lie in [a,2-a]. Use accelerated projected gradient.
     a = PRIOR_WEIGHT
     lipschitz = 2 - a
@@ -132,13 +225,13 @@ def complete_subspace(
     for step in range(1, 501):
         new = update(y)
         if np.max(abs(new - h)) <= 1e-7 and np.max(abs(update(new) - new)) <= 1e-7:
-            return new, singular[:, -1] ** 2, step
+            return new, weights, step
         y = new + momentum * (new - h)
         h = new
     raise ValueError("Localized PAW complement did not converge in 500 iterations")
 
 
-def locality_model(model, overlap_file, output, band_range, energy_window, *, pbe_model=None):
+def locality_model(model, overlap_file, output, band_range, energy_window, *, pbe_model=None, retained_policy=None):
     """Write the constrained Hamiltonian in the same fixed ordinary AO basis."""
     if paths_collide(output, (model, overlap_file)):
         raise ValueError("Choose a separate localized-model destination")
@@ -160,12 +253,18 @@ def locality_model(model, overlap_file, output, band_range, energy_window, *, pb
         dim = len(positions)
         ef = float(src.attrs["fermi_eV"])
         energies = src["k/eigenvalues"][0]
-        n = retained_bands(
+        counts = retained_counts(
             energies,
             dim,
             band_range,
             None if energy_window is None else ef + energy_window[1],
+            retained_policy,
         )
+        n = int(max(counts))
+        protected = None
+        if retained_policy == WINDOW_FIRST_BUFFER:
+            window = None if energy_window is None else ef + np.asarray(energy_window)
+            protected = protected_intervals(energies, band_range, window)
         roots = np.empty((len(k), dim, dim), complex)
         v = np.empty((len(k), dim, n), complex)
         with output_file(output) as tmp, h5py.File(tmp, "w") as out:
@@ -207,6 +306,8 @@ def locality_model(model, overlap_file, output, band_range, energy_window, *, pb
                 v,
                 energies[:, :n],
                 prior,
+                counts,
+                protected,
             )
             write_ordinary(
                 out,
@@ -237,6 +338,15 @@ def locality_model(model, overlap_file, output, band_range, energy_window, *, pb
                 complement_eV=ef + PRIOR_OFFSET_EV,
                 locality_recipe=json.dumps(recipe),
             )
+            if retained_policy is not None:
+                recipe.update(
+                    retained_policy=retained_policy,
+                    buffer_bands=2,
+                    polar_order="target_then_remainder",
+                    boundary_multiplets="same_k",
+                )
+                out.attrs["locality_recipe"] = json.dumps(recipe)
+                out["locality/retained_by_k"] = counts
             if pbe_model is not None:
                 del out.attrs["complement_eV"]
                 recipe["pbe_reference_completion"] = "locality-constrained"

@@ -2,7 +2,7 @@ import unittest
 
 import numpy as np
 
-from vasp2mlh.locality import complete_subspace, neighbor_faces, retained_bands
+from vasp2mlh.locality import complete_subspace, neighbor_faces, retained_bands, retained_counts, WINDOW_FIRST_BUFFER, protected_intervals, window_first_frame
 
 
 class LocalityTests(unittest.TestCase):
@@ -84,6 +84,75 @@ class LocalityTests(unittest.TestCase):
             solve(energies, np.tile(10 * np.eye(3), (2, 1, 1))),
             atol=1e-7,
         )
+
+    def test_target_polar_frame_and_degenerate_rotation(self):
+        rng = np.random.default_rng(51)
+        v = rng.normal(size=(1, 7, 5)) + 1j * rng.normal(size=(1, 7, 5))
+
+        def polar(x):
+            u, _, vh = np.linalg.svd(x, full_matrices=False)
+            return u @ vh
+
+        energies = np.array([[-3.0, 1.0, 1.0, 2.0, 4.0]])
+        bounds = protected_intervals(energies, [3, 3], None)
+        np.testing.assert_array_equal(bounds, [[1, 3]])
+        np.testing.assert_array_equal(
+            protected_intervals(energies, None, (0.0, 1.5)), bounds
+        )
+        np.testing.assert_array_equal(
+            protected_intervals(energies, None, (8.0, 9.0)), [[0, 0]]
+        )
+        q = window_first_frame(v, polar(v), bounds)
+        np.testing.assert_allclose(q[:, :, 1:3], polar(v[:, :, 1:3]), atol=1e-12)
+        np.testing.assert_allclose(q[0].conj().T @ q[0], np.eye(5), atol=1e-12)
+        u = np.eye(5, dtype=complex)
+        u[1:3, 1:3] = polar(rng.normal(size=(2, 2)) + 1j * rng.normal(size=(2, 2)))
+        rotated = v @ u
+        np.testing.assert_allclose(
+            window_first_frame(rotated, polar(rotated), bounds), q @ u, atol=1e-12
+        )
+
+    def test_local_buffer_closes_only_the_multiplet_at_its_own_k(self):
+        # At k=0 the fourth level is degenerate with level 3. At k=1,
+        # levels 4 and 5 form a separate multiplet above the lock.
+        energies = np.array(
+            [[0.0, 1.0, 2.0, 2.0, 4.0, 6.0], [0.0, 1.0, 2.0, 4.0, 4.0, 6.0]]
+        )
+        counts = retained_counts(energies, 4, [1, 1], None, WINDOW_FIRST_BUFFER)
+        np.testing.assert_array_equal(counts, [4, 3])
+        np.testing.assert_array_equal(
+            retained_counts(energies, 4, None, 0.5, WINDOW_FIRST_BUFFER), counts
+        )
+        projections = np.tile(np.eye(4), (2, 1, 1))
+        projections[1, :, 3] = 0  # padding outside the retained subspace
+        points = np.array([[0.0, 0.0, 0.0], [0.5, 0.0, 0.0]])
+        h, weights, _ = complete_subspace(
+            points,
+            [2, 1, 1],
+            np.eye(3),
+            np.zeros((4, 3)),
+            projections,
+            energies,
+            10.0,
+            counts,
+        )
+        for i, n in enumerate(counts):
+            q = projections[i, :, :n]
+            np.testing.assert_allclose(h[i] @ q, q * energies[i, :n], atol=1e-9)
+        self.assertGreaterEqual(h[1, 3, 3].real, 2.1)
+        np.testing.assert_allclose(weights, 1)
+        projections[1, :, 2] = 0
+        with self.assertRaisesRegex(ValueError, r"k=\[0.5, 0.0, 0.0\], bands 1-3"):
+            complete_subspace(
+                points,
+                [2, 1, 1],
+                np.eye(3),
+                np.zeros((4, 3)),
+                projections,
+                energies,
+                10.0,
+                counts,
+            )
 
     def test_degenerate_buffer_and_rank_checks(self):
         en = np.array([[-2.0, 0.5, 1.0, 1.0, 5.0], [-1.9, 0.5, 1.0, 1.3, 5.0]])

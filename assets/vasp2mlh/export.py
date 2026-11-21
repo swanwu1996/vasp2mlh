@@ -9,7 +9,7 @@ import numpy as np
 from ase.io import write
 from scipy.linalg import block_diag
 
-from .pipeline import output_file, paths_collide
+from .pipeline import file_sha256, output_file, paths_collide
 from .registry import audit
 from .realspace import structure, orbital_bounds, pair_blocks
 
@@ -71,9 +71,30 @@ def _write_deeph(model, destination, basis_info):
         tmp.rename(dest)
 
 
+def batch_inputs(models, destination):
+    if len(models) == 1 and Path(models[0]).suffix.lower() == ".json":
+        from .batch import models_from_summary
+
+        if paths_collide(destination, models):
+            raise ValueError("Dataset output collides with batch summary")
+        path = Path(models[0])
+        fingerprint = file_sha256(path)
+        return models_from_summary(path), (path, fingerprint)
+    return models, None
+
+
+def verify_summary_snapshot(summary, models):
+    from .batch import models_from_summary
+
+    path, fingerprint = summary
+    if models_from_summary(path) != models or file_sha256(path) != fingerprint:
+        raise ValueError("Batch changed during dataset export")
+
+
 def deeph_batch(models, destination, registry):
     """Export a checked cohort as numbered DeepH samples, atomically."""
     dest = Path(destination)
+    models, summary = batch_inputs(models, dest)
     reports = audit(models, registry, labels=True)
     dest.parent.mkdir(parents=True, exist_ok=True)
     if dest.exists() and (not dest.is_dir() or any(dest.iterdir())):
@@ -82,7 +103,22 @@ def deeph_batch(models, destination, registry):
         dataset = Path(staging) / "dataset"
         dataset.mkdir()
         for i, (model, info) in enumerate(zip(models, reports)):
-            _write_deeph(model, dataset / str(i), info)
+            folder = dataset / str(i)
+            _write_deeph(model, folder, info)
+            if summary is not None:
+                from .readback import deeph_blocks, verify_blocks
+
+                with h5py.File(model) as native:
+                    verify_blocks(
+                        deeph_blocks(folder, native, info),
+                        "deeph",
+                        native,
+                        native["band_validation/kpoints"][:]
+                        if "band_validation/kpoints" in native
+                        else native["k/points"][:8],
+                    )
+        if summary is not None:
+            verify_summary_snapshot(summary, models)
         dataset.rename(dest)
 
 
@@ -207,6 +243,7 @@ def ham_graph(f, nao):
 
 
 def hamgnn(models, output, nao=14, registry=None):
+    models, summary = batch_inputs(models, output)
     if Path(output).is_symlink() or paths_collide(output, [*models, registry]):
         raise ValueError("HamGNN output collides with an input or symlink")
     reports = audit(models, registry, labels=True)
@@ -217,5 +254,27 @@ def hamgnn(models, output, nao=14, registry=None):
             graphs[i].ao_sha256_by_element = json.dumps(
                 info["sha256_by_element"], sort_keys=True
             )
-    with output_file(output) as tmp, tmp.open("wb") as stream:
-        np.savez_compressed(stream, graph=graphs)
+    with output_file(output) as tmp:
+        with tmp.open("wb") as stream:
+            np.savez_compressed(stream, graph=graphs)
+        if summary is not None:
+            from .readback import load_graphs, hamgnn_blocks, verify_blocks
+
+            del graphs
+            stored = load_graphs(tmp)
+            if len(stored) != len(models):
+                raise ValueError("Exported graph count differs from batch")
+            for i, (path, info) in enumerate(zip(models, reports)):
+                with h5py.File(path) as native:
+                    exported = hamgnn_blocks(
+                        tmp, native, info, nao, graph=stored.pop(i)
+                    )
+                    verify_blocks(
+                        exported,
+                        "hamgnn",
+                        native,
+                        native["band_validation/kpoints"][:]
+                        if "band_validation/kpoints" in native
+                        else native["k/points"][:8],
+                    )
+            verify_summary_snapshot(summary, models)

@@ -70,6 +70,7 @@ def convert_sample(args):
             max_rmse=args.max_rmse,
             max_error=args.max_error,
             completion_method=args.completion_method,
+            retained_policy=args.retained_policy,
             centre_offset=args.centre_offset,
             width=args.width,
             floor=args.floor,

@@ -133,6 +133,10 @@ class BatchTests(unittest.TestCase):
         self.assertEqual(go()["status"], "converted")
         self.assertEqual(go()["status"], "skipped")
         self.assertEqual(build.call_count, 1)
+        with patch(
+            "vasp2mlh.batch.hash_at_stamp", side_effect=AssertionError("read input")
+        ):
+            self.assertEqual(convert(job, self.out, 1, fast_resume=True)["status"], "skipped")
         target = self.out / "a.h5"
         target.write_bytes(b"incomplete")
         self.assertEqual(go()["status"], "converted")
@@ -141,7 +145,7 @@ class BatchTests(unittest.TestCase):
         old = target.read_bytes()
         (self.source / "WAVECAR").write_text("new wavefunction")
         sparse.side_effect = ValueError("calculation failed")
-        self.assertEqual(go()["status"], "failed")
+        self.assertEqual(convert(job, self.out, 1, fast_resume=True)["status"], "failed")
         self.assertEqual(target.read_bytes(), old)
         sparse.side_effect = store
         self.assertEqual(go()["status"], "converted")
@@ -149,6 +153,39 @@ class BatchTests(unittest.TestCase):
         with h5py.File(target, "w") as f:
             f.attrs["user"] = "other"
         self.assertIn("not owned", go()["error"])
+
+    def test_summary_export_excludes_failed_and_rechecks_hash_and_identity(self):
+        from vasp2mlh.batch import models_from_summary
+        from vasp2mlh.pipeline import file_sha256
+
+        self.out.mkdir()
+        model = self.out / "a.h5"
+        with h5py.File(model, "w") as f:
+            f.attrs.update(batch_id="a", batch_mode="hybrid", batch_signature="ok")
+        row = dict(
+            id="a",
+            status="skipped",
+            model="a.h5",
+            signature="ok",
+            sha256=file_sha256(model),
+        )
+        manifest = dict(
+            mode="hybrid",
+            status="failed",
+            check_only=False,
+            jobs=[dict(id="bad", status="failed"), row],
+        )
+        summary = self.out / "summary.json"
+        summary.write_text(json.dumps(manifest))
+        self.assertEqual(models_from_summary(summary), [model])
+        row["signature"] = "wrong"
+        summary.write_text(json.dumps(manifest))
+        with self.assertRaisesRegex(ValueError, "signature"):
+            models_from_summary(summary)
+        row["sha256"] = "wrong"
+        summary.write_text(json.dumps(manifest))
+        with self.assertRaisesRegex(ValueError, "changed"):
+            models_from_summary(summary)
 
     def test_validated_requires_reference_and_defaults_to_fermi_window(self):
         self.config["mode"] = "validated"

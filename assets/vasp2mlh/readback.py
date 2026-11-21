@@ -81,7 +81,7 @@ def deeph_blocks(folder, model, info):
     return {key: (v, s[key]) for key, v in h.items()}
 
 
-def load_graph(path):
+def load_graphs(path):
     """Read the PyG object array using only the classes emitted by this exporter."""
     import torch
     from torch_geometric.data.data import Data, DataEdgeAttr, DataTensorAttr
@@ -129,13 +129,21 @@ def load_graph(path):
         )
         graphs = GraphReader(stream).load().item()
     require(
-        isinstance(graphs, dict) and set(graphs) == {0} and isinstance(graphs[0], Data),
-        "Expected one HamGNN graph for this structure",
+        isinstance(graphs, dict)
+        and set(graphs) == set(range(len(graphs)))
+        and all(isinstance(g, Data) for g in graphs.values()),
+        "Invalid indexed HamGNN graph collection",
     )
+    return graphs
+
+
+def load_graph(path):
+    graphs = load_graphs(path)
+    require(len(graphs) == 1, "Expected one HamGNN graph for this structure")
     return graphs[0]
 
 
-def hamgnn_blocks(path, model, info, nao):
+def hamgnn_blocks(path, model, info, nao, *, graph=None):
     from DFT_interfaces.openmx.utils import (
         au2ang,
         au2ev,
@@ -144,7 +152,7 @@ def hamgnn_blocks(path, model, info, nao):
         basis_def_26,
     )
 
-    g = load_graph(path)
+    g = load_graph(path) if graph is None else graph
     atoms = structure(model)
     n = len(atoms)
     require(
@@ -260,6 +268,12 @@ def verify_export(output, fmt, model, points, nao=None):
         files = [Path(output) / "graph_data.npz"]
         exported = hamgnn_blocks(files[0], model, info, nao or 14)
 
+    result = verify_blocks(exported, fmt, model, points)
+    result["file_sha256"] = {str(p.relative_to(output)): file_sha256(p) for p in files}
+    return result
+
+
+def verify_blocks(exported, fmt, model, points):
     # Group by atom pair so the independent-k Fourier check never allocates Nk x D x D.
     by_pair = defaultdict(list)
     for key, h, s in blocks(model):
@@ -293,5 +307,4 @@ def verify_export(output, fmt, model, points, nao=None):
         kpoints=len(points),
         max_delta_Hk_eV=max_h,
         max_delta_Sk=max_s,
-        file_sha256={str(p.relative_to(output)): file_sha256(p) for p in files},
     )

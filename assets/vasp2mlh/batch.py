@@ -3,6 +3,7 @@
 import hashlib
 import json
 import multiprocessing
+import os
 import re
 import sys
 from collections import Counter
@@ -74,6 +75,7 @@ def read_jobs(manifest, config=None):
         "projection": {"cutoff", "mesh", "complement"},
     }
     modes["hybrid"] = modes["noncollinear"] = modes["validated"] | {"completion_method"}
+    modes["hybrid"] = modes["hybrid"] | {"retained_policy"}
     if (
         not isinstance(mode, str)
         or mode not in modes
@@ -143,6 +145,9 @@ def read_jobs(manifest, config=None):
                     or any(type(v) not in kinds for v in value)
                 ):
                     raise ValueError(f"Invalid {key} array for job {label}")
+            elif key == "retained_policy":
+                if value != "window-first-buffer-2":
+                    raise ValueError(f"Unknown retained policy for job {label}")
             elif key == "completion_method":
                 if value not in ("spectral-ritz", "locality-constrained", "pbe-anchored-v1"):
                     raise ValueError(f"Unknown hybrid method for job {label}")
@@ -191,7 +196,7 @@ def input_paths(job):
         paths.append(job["reference"] / "vasprun.xml")
         src = metadata(source / "vasprun.xml")
         directory = resolve_pbe_run(
-            src, source, job.get("pbe_run"), job["options"].get("completion_method")
+            src, source, job.get("pbe_run"), job["options"].get("completion_method"), job["options"].get("retained_policy")
         )
         if directory is not None:
             paths.extend(
@@ -226,7 +231,7 @@ def write_json(path, data):
         tmp.write_text(json.dumps(data, indent=2, allow_nan=False) + "\n")
 
 
-def convert(job, output, threads, backend=None):
+def convert(job, output, threads, backend=None, fast_resume=False):
     started = monotonic()
     label, mode = job["id"], job["mode"]
     target = output / (label + ".h5")
@@ -235,31 +240,48 @@ def convert(job, output, threads, backend=None):
         with backend_setting(backend), threadpool_limits(limits=threads):
             files = input_paths(job)
             stamps = [stamp(p) for p in files]
+            saved = {}
+            if target.exists():
+                try:
+                    record = json.loads(receipt.read_text())
+                    if isinstance(record, dict):
+                        saved = record
+                except (FileNotFoundError, ValueError):
+                    pass
+            cached = saved.pop("input_fingerprints", None)
+            signatures = [[str(p), list(st)] for p, st in zip(files, stamps)]
+            reuse = (
+                fast_resume
+                and isinstance(cached, list)
+                and len(cached) == len(files)
+                and all(
+                    isinstance(row, list)
+                    and len(row) == 3
+                    and row[:2] == st
+                    and isinstance(row[2], str)
+                    and re.fullmatch(r"[0-9a-f]{64}", row[2])
+                    for row, st in zip(cached, signatures)
+                )
+            )
             signature = {
                 "version": __version__,
                 "mode": mode,
                 "options": job["options"],
                 "backend": radial_backend(),
                 "inputs": [
-                    (str(p), hash_at_stamp(p, st)) for p, st in zip(files, stamps)
+                    (str(p), cached[i][2] if reuse else hash_at_stamp(p, st))
+                    for i, (p, st) in enumerate(zip(files, stamps))
                 ],
-            }
-            # Keep role assignments even if several directories share the same inputs.
-            signature["directories"] = {
-                k: str(job[k])
-                for k in ("run", "reference", "potential_run", "pbe_run")
-                if k in job
+                "directories": {
+                    k: str(job[k])
+                    for k in ("run", "reference", "potential_run", "pbe_run")
+                    if k in job
+                },
             }
             key = hashlib.sha256(
                 json.dumps(signature, sort_keys=True, allow_nan=False).encode()
             ).hexdigest()
             if target.exists():
-                try:
-                    saved = json.loads(receipt.read_text())
-                except (FileNotFoundError, ValueError):
-                    saved = {}
-                if not isinstance(saved, dict):
-                    saved = {}
                 try:
                     with h5py.File(target) as f:
                         if f.attrs.get("batch_id") != label:
@@ -286,6 +308,10 @@ def convert(job, output, threads, backend=None):
                         "status": "skipped",
                         "seconds": monotonic() - started,
                     }
+            if reuse:
+                # A cache hit only authorizes skipping an intact, signed output.
+                # Always rehash before rebuilding an output with stale provenance.
+                return convert(job, output, threads, backend, fast_resume=False)
             point_callback = (
                 count_projected_point if _projected_points is not None else None
             )
@@ -313,7 +339,7 @@ def convert(job, output, threads, backend=None):
                 else:
                     options = job["options"].copy()
                     cutoff = options.pop("cutoff", None)
-                    with TemporaryDirectory(dir=output) as d:
+                    with TemporaryDirectory(dir=os.environ.get("TMPDIR") or output) as d:
                         dense = Path(d) / "projection.h5"
                         build(
                             job["run"],
@@ -343,7 +369,11 @@ def convert(job, output, threads, backend=None):
                     "seconds": monotonic() - started,
                     **metrics,
                 }
-            write_json(receipt, result)
+            fingerprints = [
+                row + [digest]
+                for row, (_, digest) in zip(signatures, signature["inputs"])
+            ]
+            write_json(receipt, {**result, "input_fingerprints": fingerprints})
             return result
     except Exception as exc:
         return {
@@ -353,6 +383,47 @@ def convert(job, output, threads, backend=None):
             "error": f"{type(exc).__name__}: {exc}",
             "seconds": monotonic() - started,
         }
+
+
+def models_from_summary(path):
+    """Resolve exactly the successful outputs in a finished conversion summary."""
+    path = Path(path)
+    report = load_config(path)
+    if report.get("check_only") is not False or report.get("status") not in (
+        "complete",
+        "failed",
+    ):
+        raise ValueError("Expected a finished batch conversion summary")
+    models = []
+    for row in report["jobs"]:
+        if row["status"] == "failed":
+            continue
+        name = row["id"]
+        if (
+            row["status"] not in ("converted", "skipped")
+            or not isinstance(name, str)
+            or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]*", name)
+            or row.get("model") != name + ".h5"
+        ):
+            raise ValueError("Invalid model entry in batch summary")
+        model = path.parent / row["model"]
+        if (
+            model in models
+            or model.is_symlink()
+            or file_sha256(model) != row.get("sha256")
+        ):
+            raise ValueError(f"Duplicate or changed batch model: {model}")
+        with h5py.File(model) as f:
+            if (
+                f.attrs.get("batch_id") != name
+                or f.attrs.get("batch_mode") != report.get("mode")
+                or f.attrs.get("batch_signature") != row["signature"]
+            ):
+                raise ValueError(f"Model signature differs from batch summary: {name}")
+        models.append(model)
+    if not models:
+        raise ValueError("No successful models in the batch summary")
+    return models
 
 
 def preflight(job):
@@ -376,7 +447,7 @@ def preflight(job):
     largest_mesh = projected
     if job["mode"] in ("hybrid", "noncollinear"):
         directory = resolve_pbe_run(
-            src, run, job.get("pbe_run"), job["options"].get("completion_method")
+            src, run, job.get("pbe_run"), job["options"].get("completion_method"), job["options"].get("retained_policy")
         )
         if directory is not None:
             ref_pbe = check_pbe_pair(src, run, directory, job["options"].get("mesh"))
@@ -500,7 +571,7 @@ def run_batch(manifest, output=None, workers=None, threads=None, check_only=None
             try:
                 futures = {
                     pool.submit(
-                        convert, job, output, threads, settings.get("backend")
+                        convert, job, output, threads, settings.get("backend"), settings.get("fast_resume", False)
                     ): job["id"]
                     for job in jobs
                 }

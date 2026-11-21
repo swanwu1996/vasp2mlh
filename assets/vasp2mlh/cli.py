@@ -1,6 +1,5 @@
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
 from xml.etree.ElementTree import ParseError
@@ -189,6 +188,11 @@ def make_parser():
         help="dimensions for explicitly listed uniform source points",
     )
     for operation in (single, release):
+        operation.add_argument(
+            "--retained-policy",
+            choices=("window-first-buffer-2",),
+            help="scalar HSE beta: prioritize the target-band frame; close the second buffer multiplet at each k",
+        )
         operation.add_argument("--pbe-run", help="denser matching PBE SCF directory for scalar HSE (default: RUN/pbe)")
         operation.add_argument(
             "--completion-method",
@@ -264,7 +268,7 @@ def make_parser():
     batch = subs.add_parser(
         "deeph-batch", help="export a checked cohort of DeepH samples"
     )
-    batch.add_argument("models", nargs="+")
+    batch.add_argument("models", nargs="+", help="native models or one finished batch summary.json")
     batch.add_argument("-o", "--output", required=True)
     batch.add_argument("--basis-lock", required=True)
     make = subs.add_parser(
@@ -424,7 +428,7 @@ def make_parser():
     dh.add_argument("destination")
     dh.add_argument("--basis-lock")
     ham = subs.add_parser("hamgnn", help="export a HamGNN OpenMX graph archive")
-    ham.add_argument("models", nargs="+")
+    ham.add_argument("models", nargs="+", help="native models or one finished batch summary.json")
     ham.add_argument("--basis-lock")
     ham.add_argument("-o", "--output", required=True)
     ham.add_argument("--nao-max", type=int, choices=(14, 19, 26), default=14)
@@ -473,6 +477,7 @@ def main(argv=None, *, validation_only=False):
     from contextlib import ExitStack
     from threadpoolctl import threadpool_limits
     from .configuration import (
+        anchor_config_paths,
         backend_setting,
         load_config,
         operation_args,
@@ -542,8 +547,7 @@ def main(argv=None, *, validation_only=False):
                     args = operation_args(
                         command, commands[command], config.get("parameters", {})
                     )
-                    stack.callback(os.chdir, Path.cwd())
-                    os.chdir(path.parent)
+                    anchor_config_paths(args, path.parent)
                     for name in ("output", "output_dir", "destination"):
                         dest = getattr(args, name, None)
                         if dest is not None and paths_collide(dest, [path]):

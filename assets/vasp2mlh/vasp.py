@@ -175,9 +175,32 @@ def metadata(path):
         for r in root.findall("./atominfo/array[@name='atoms']/set/rc")
     ]
     final = root.find("./structure[@name='finalpos']")
+    last = root.find("./calculation[last()]")
+    if last is None:
+        raise ValueError("Missing completed ionic step in VASP XML")
+    step_geometry = last.find("structure")
     cell = table(final, "./crystal/varray[@name='basis']")
     frac = table(final, "./varray[@name='positions']")
+    if step_geometry is not None:
+        step_cell = table(step_geometry, "./crystal/varray[@name='basis']")
+        step_frac = table(step_geometry, "./varray[@name='positions']")
+        if step_cell.shape != (3, 3) or step_frac.shape != frac.shape:
+            raise ValueError("Invalid final electronic-step geometry")
+        offset = step_frac - frac
+        if not np.allclose(step_cell, cell, atol=1e-7, rtol=0) or not np.allclose(
+            offset, np.rint(offset), atol=1e-7, rtol=0
+        ):
+            raise ValueError("Final geometry differs from the last electronic step; run static SCF")
     params = root.find("parameters")
+    if params is None:
+        raise ValueError("Missing effective VASP XML parameters")
+    if (
+        int(params.findtext(".//*[@name='IBRION']", "-1")) == 0
+        and int(params.findtext(".//*[@name='NSW']", "0")) > 0
+    ):
+        raise ValueError(
+            "MD WAVECAR may hold predicted wavefunctions; run static SCF on the snapshot"
+        )
 
     def param(name):
         value = params.findtext(f".//*[@name='{name}']")
@@ -229,8 +252,6 @@ def metadata(path):
     neutral = sum(int(row[0].text) * float(row[3].text) for row in types)
     titles = {row[1].text.strip(): row[4].text.strip() for row in types}
     mesh = root.findtext("./kpoints/generation/v[@name='divisions']")
-    calcs = root.findall("./calculation")
-    last = calcs[-1]
     steps = last.findall("scstep/energy/i[@name='e_fr_energy']")
     delta = (
         abs(float(steps[-1].text) - float(steps[-2].text)) if len(steps) >= 2 else None
@@ -244,6 +265,7 @@ def metadata(path):
         kpoints=table(root, "./kpoints/varray[@name='kpointlist']"),
         weights=table(root, "./kpoints/varray[@name='weights']").ravel(),
         mesh=None if mesh is None else list(map(int, mesh.split())),
+        isym=params.findtext(".//*[@name='ISYM']", "unknown").strip(),
         spinor=param("LNONCOLLINEAR") == "T",
         soc=param("LSORBIT") == "T",
         saxis=list(map(float, param("SAXIS").split())),
@@ -276,20 +298,30 @@ class Wavecar:
                 raise ValueError(
                     "Expected a little-endian WAVECAR with RTAG 45200/45210/53300/53310"
                 )
+            if not np.isfinite(first).all() or np.any(first != np.floor(first)):
+                raise ValueError("Invalid WAVECAR record size or spin count")
             self.recl, self.ns, tag = map(int, first)
             self.dtype = np.dtype("<c8" if tag in (45200, 53300) else "<c16")
-            if self.recl < 104 or self.ns not in (1, 2):
+            if self.recl < 104 or self.recl % 8 or self.ns not in (1, 2):
                 raise ValueError("Invalid WAVECAR header")
             file.seek(self.recl)
             h = np.fromfile(file, "<f8", 13)
+            if (
+                len(h) != 13
+                or not np.isfinite(h[:12]).all()
+                or np.any(h[:2] != np.floor(h[:2]))
+            ):
+                raise ValueError("Invalid or truncated WAVECAR dimensions")
             self.nk, self.nb = map(int, h[:2])
             self.encut = h[2]
             self.cell = h[3:12].reshape(3, 3)
         header_bytes = (4 + 3 * self.nb) * 8
         self.header_records = (header_bytes + self.recl - 1) // self.recl
-        if min(self.nk, self.nb, self.encut) <= 0 or (
-            tag < 53000 and self.header_records != 1
-        ):
+        if tag < 53000 and self.header_records != 1:
+            raise ValueError(
+                f"Legacy WAVECAR k header requires {header_bytes} bytes in a {self.recl}-byte record"
+            )
+        if min(self.nk, self.nb, self.encut) <= 0:
             raise ValueError("Invalid WAVECAR dimensions")
         if (
             self.path.stat().st_size
@@ -298,6 +330,8 @@ class Wavecar:
             raise ValueError("Truncated WAVECAR")
 
     def read(self, spin, ik):
+        if not (0 <= spin < self.ns and 0 <= ik < self.nk):
+            raise ValueError("WAVECAR spin or k-point index out of bounds")
         base = 2 + (spin * self.nk + ik) * (self.nb + self.header_records)
         with self.path.open("rb") as file:
             file.seek(base * self.recl)

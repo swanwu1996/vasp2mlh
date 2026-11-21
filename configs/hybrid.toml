@@ -10,4 +10,6 @@ format = "deeph"
 completion_method = "pbe-anchored-v1"
 # Scalar HSE uses pbe-anchored-v1 automatically. Supply a converged denser PBE mesh.
 # pbe_run = "./pbe"              # omitted: RUN/pbe
+# Optional MgO-tested policy for a fixed AO library and target window.
+# retained_policy = "window-first-buffer-2"
 # Independent energies come from KPOINTS_OPT or zero-weight k points in this SCF.
