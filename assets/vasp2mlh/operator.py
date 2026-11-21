@@ -33,10 +33,9 @@ def check_potential_source(source, other):
     if is_hubbard(source):
         check_hubbard(source)
         check_hubbard(other)
-    allowed_spins = (1, 2) if is_hubbard(source) else (1,)
     if (
         source["spinor"]
-        or source["nspin"] not in allowed_spins
+        or source["nspin"] not in (1, 2)
         or other["spinor"]
         or other["nspin"] != source["nspin"]
         or source["soc"]
@@ -46,7 +45,7 @@ def check_potential_source(source, other):
         or value("METAGGA") not in ("", "--", "F", "NONE")
     ):
         raise ValueError(
-            "Direct operator currently supports scalar nonmagnetic semilocal LDA/GGA"
+            "Direct operator currently supports scalar or collinear semilocal LDA/GGA"
         )
     if (
         atoms.get_chemical_symbols() != ions.get_chemical_symbols()

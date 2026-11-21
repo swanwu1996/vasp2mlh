@@ -1,5 +1,7 @@
 import argparse
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 from xml.etree.ElementTree import ParseError
@@ -7,6 +9,7 @@ from xml.etree.ElementTree import ParseError
 import h5py
 import numpy as np
 
+from .configuration import BOUNDED_COLLINEAR
 from .atomic import COMPACT_METHOD, NATIVE_METHOD
 from .comparison import compare_path, write_comparison
 from .analysis import held_out, locality, lobster_summary, spectra
@@ -117,6 +120,9 @@ def make_parser():
         nargs=3,
         help="dimensions for an explicitly listed uniform grid",
     )
+    full = subs.add_parser("prepare-full-mesh", help="prepare a full-grid fixed-density VASP run from a nonmagnetic semilocal SCF")
+    full.add_argument("run")
+    full.add_argument("destination")
     bulk = subs.add_parser(
         "convert-batch",
         help="convert VASP directories in a JSON manifest to sparse HDF5 models",
@@ -135,7 +141,7 @@ def make_parser():
     )
     release = subs.add_parser(
         "reconstruct-bands",
-        help="build a fixed-basis scalar LDA/GGA model and validate its cutoff spectrum on independent VASP points",
+        help="build a fixed-basis model and validate its cutoff spectrum against independent VASP points",
     )
     release.add_argument("run", help="full uniform VASP source mesh")
     release.add_argument("registry", help="frozen AO registry HDF5")
@@ -197,9 +203,9 @@ def make_parser():
         operation.add_argument("--pbe-run", help="denser matching PBE SCF directory for scalar HSE (default: RUN/pbe)")
         operation.add_argument(
             "--completion-method",
-            choices=("auto", "spectral-ritz", "locality-constrained", "pbe-anchored-v1"),
+            choices=("auto", "spectral-ritz", "locality-constrained", "pbe-anchored-v1", BOUNDED_COLLINEAR),
             default=None,
-            help="automatic from VASP XML: scalar HSE uses pbe-anchored-v1 (beta); scalar/collinear DFT+U reads the full PAW strengths; other supported hybrids and noncollinear sources default to locality-constrained",
+            help="automatic from VASP XML: scalar HSE uses pbe-anchored-v1 (beta); scalar/collinear DFT+U reads the full PAW strengths; collinear-window-ritz-v1 is an optional bounded method for two semilocal spin channels",
         )
         operation.add_argument(
             "--centre-offset",
@@ -481,6 +487,24 @@ def valid_main(argv=None):
     return main(["valid", *(sys.argv[1:] if argv is None else argv)])
 
 
+def restart_for_openblas(threads, argv):
+    """Initialize OpenBLAS with the requested workspace before raising its thread count."""
+    from threadpoolctl import threadpool_info
+
+    limit = os.environ.get("OPENBLAS_NUM_THREADS", "")
+    if not limit.isdecimal() or not 0 < int(limit) < threads:
+        return False
+    if not any(pool["internal_api"] == "openblas" for pool in threadpool_info()):
+        return False
+    env = {**os.environ, "OPENBLAS_NUM_THREADS": str(threads)}
+    command = ([str(Path(sys.executable).resolve())] if getattr(sys, "frozen", False)
+               else [sys.executable, "-m", "vasp2mlh"])
+    status = subprocess.run([*command, *argv], env=env).returncode
+    if status:
+        raise SystemExit(status if status > 0 else 128 - status)
+    return True
+
+
 def main(argv=None, *, validation_only=False):
     from contextlib import ExitStack
     from threadpoolctl import threadpool_limits
@@ -496,6 +520,7 @@ def main(argv=None, *, validation_only=False):
     argv = sys.argv[1:] if argv is None else argv
     if validation_only:
         argv = ["valid", *argv]
+    invocation = list(argv)
     if not argv:
         if Path("mlh.toml").is_file():
             argv = ["mlh.toml"]
@@ -591,11 +616,17 @@ def main(argv=None, *, validation_only=False):
                             raise ValueError("Output collides with control file")
                     stack.enter_context(backend_setting(settings.get("backend")))
                     if command != "convert" and "threads" in settings:
-                        stack.enter_context(
-                            threadpool_limits(limits=settings["threads"])
-                        )
+                        if restart_for_openblas(settings["threads"], invocation):
+                            return
+                        stack.enter_context(threadpool_limits(limits=settings["threads"]))
             else:
                 args = parser.parse_args(argv)
+            if args.command == "convert-batch":
+                requested = args.threads
+                if requested is None:
+                    requested = runtime_controls(load_config(args.manifest), batch=True).get("threads", 1)
+                if restart_for_openblas(requested, invocation):
+                    return
             if args.command == "convert":
                 if (
                     args.threads is not None
@@ -608,8 +639,13 @@ def main(argv=None, *, validation_only=False):
                 )
                 if threads < 1:
                     raise ValueError("threads must be a positive integer")
+                # Keep the requested budget in force for in-process dispatch hooks.
+                # The numerical command can relaunch with a larger BLAS workspace.
+                parser.openblas_launch = (threads, invocation)
                 stack.enter_context(threadpool_limits(limits=threads))
             if program == "v2h_valid":
+                if restart_for_openblas(*parser.openblas_launch):
+                    return
                 from .validation import validate_sample
 
                 return validate_sample(args, path)
@@ -642,9 +678,16 @@ def check_analysis_output(output, *inputs):
 
 def execute(parser, args):
     if args.command == "convert":
+        launch = getattr(parser, "openblas_launch", None)
+        if launch and restart_for_openblas(*launch):
+            return
         from .conversion import convert_sample
 
         convert_sample(args)
+    elif args.command == "prepare-full-mesh":
+        from .band_release import prepare_full_mesh
+
+        prepare_full_mesh(args.run, args.destination)
     elif args.command == "convert-batch":
         from .batch import run_batch
 

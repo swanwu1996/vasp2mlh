@@ -5,7 +5,7 @@ from pathlib import Path
 
 import h5py
 import numpy as np
-from scipy.linalg import block_diag, eigvalsh
+from scipy.linalg import block_diag, eigh
 
 from vasp2mlh.band_release import check_source, independent_points, window_mask
 
@@ -15,11 +15,38 @@ from vasp2mlh.model import adjoint, ao_and_metric, spin_rotation
 from vasp2mlh.pipeline import file_sha256
 from vasp2mlh.realspace import matrices_k, structure
 from vasp2mlh.registry import read_shells
+from vasp2mlh.spillage import DEGENERACY_EV
 from vasp2mlh.vasp import Wavecar, metadata, plane_waves, spectral_mode
 
 
 class ActionUnavailable(ValueError):
     """Independent wavefunctions cannot score the selected k points or energy window."""
+
+
+def cluster_angles(native, levels, selected, projections, model_vectors):
+    """Largest principal angle per target multiplet in the orthonormal AO frame."""
+    count = min(len(native), len(levels))
+    # Close a cluster if either spectrum has a degeneracy across the boundary.
+    gaps = np.minimum(np.diff(native[:count]), np.diff(levels[:count]))
+    groups = np.split(np.arange(count), np.flatnonzero(gaps > DEGENERACY_EV) + 1)
+    angles = []
+    unresolved = 0
+    for group in groups:
+        if not np.any(np.isin(group, selected)):
+            continue
+        if group[-1] + 1 == count and any(
+            len(row) > count and row[count] - row[count - 1] <= DEGENERACY_EV
+            for row in (native, levels)
+        ):
+            unresolved += 1
+            continue
+        frame, singular, _ = np.linalg.svd(projections[:, group], full_matrices=False)
+        if len(singular) < len(group) or singular[-1] < 1e-6:
+            unresolved += 1
+            continue
+        cosines = np.linalg.svd(adjoint(frame) @ model_vectors[:, group], compute_uv=False)
+        angles.append(float(np.degrees(np.arccos(np.clip(cosines[-1], 0, 1)))))
+    return angles, unresolved
 
 
 def reference_records(meta, wave):
@@ -33,7 +60,7 @@ def reference_records(meta, wave):
             raise ValueError("Different WAVECAR and XML k-point counts")
         return holdout, holdout["wave_indices"]
     if meta["icharg"] != 11 or wave.nk != len(meta["kpoints"]):
-        raise ValueError("Expected a matching scalar fixed-density WAVECAR and XML")
+        raise ValueError("Expected matching fixed-density WAVECAR and XML")
     return meta, np.arange(wave.nk)
 
 
@@ -55,7 +82,7 @@ def audit(run, models, energy_window=None, band_range=None):
     ):
         raise ValueError("Energy window must have finite, increasing bounds")
     if wave.ns != ref["nspin"] or wave.ns not in (1, 2):
-        raise ValueError("Expected a single scalar or spinor WAVECAR channel")
+        raise ValueError("WAVECAR spin channels differ from XML")
     spectral = spectral_mode(ref)
     if spectral:
         check_source(ref, run)
@@ -108,6 +135,8 @@ def audit(run, models, energy_window=None, band_range=None):
                     raise ActionUnavailable(str(exc)) from exc
                 raise
             h, s = matrices_k(f, samples["kpoints"][indices])
+            angles = []
+            unresolved_clusters = 0
             residual = []
             within = []
             projected_norms, leakage_norms = [], []
@@ -130,7 +159,9 @@ def audit(run, models, energy_window=None, band_range=None):
                             "Independent eigenpairs differ between XML and WAVECAR"
                         )
                     ordinary = block_diag(s[i], s[i]) if spinor else s[i]
-                    levels = eigvalsh(h[channel, i], ordinary)
+                    _, ia = metric_factors(ordinary)
+                    orthogonal_h = ia @ h[channel, i] @ ia
+                    levels, model_vectors = eigh(orthogonal_h)
                     mask = window_mask(e[:, 0][None], levels[None], band_range, window)
                     selected = np.flatnonzero(mask[0])
                     if not len(selected):
@@ -145,22 +176,23 @@ def audit(run, models, energy_window=None, band_range=None):
                     )
                     sp = phi + p @ (d @ (adjoint(p) @ phi))
                     _, ip = metric_factors(adjoint(phi) @ sp)
-                    components = np.split(c[:, selected], 2 if spinor else 1)
+                    components = np.split(c, 2 if spinor else 1)
                     v = np.vstack([ip @ (adjoint(sp) @ part) for part in components])
                     if spinor:
                         v = (spin_rotation(ref["saxis"]) @ v.reshape(2, -1)).reshape(
                             v.shape
                         )
+                    values, missing = cluster_angles(e[:, 0], levels, selected, v, model_vectors)
+                    angles.extend(values)
+                    unresolved_clusters += missing
+                    v = v[:, selected]
                     # Closest orthonormal frame to the selected projected reference columns.
                     left, singular, right = np.linalg.svd(v, full_matrices=False)
-                    if singular[-1] < 1e-6:
+                    if len(singular) < len(selected) or singular[-1] < 1e-6:
                         raise ValueError("Independent projected edge is rank deficient")
                     weights.append(float(singular[-1] ** 2))
                     q = left @ right
-                    _, ia = metric_factors(s[i])
-                    if spinor:
-                        ia = block_diag(ia, ia)
-                    delta = ia @ h[channel, i] @ ia @ q - q * e[selected, 0]
+                    delta = orthogonal_h @ q - q * e[selected, 0]
                     residual.extend(np.linalg.norm(delta, axis=0))
                     projected = adjoint(q) @ delta
                     within.append(np.linalg.norm(projected, ord=2))
@@ -180,6 +212,11 @@ def audit(run, models, energy_window=None, band_range=None):
                 "band_range_1based": band_range,
                 "energy_window_from_source_fermi_eV": energy_window,
                 "min_subspace_weight": min(weights),
+                "cluster_degeneracy_eV": DEGENERACY_EV,
+                "resolved_clusters": len(angles),
+                "unresolved_clusters": unresolved_clusters,
+                "max_principal_angle_deg": max(angles) if angles else None,
+                "rms_cluster_max_angle_deg": float(np.sqrt(np.mean(np.square(angles)))) if angles else None,
                 "rms_action_eV": float(np.mean(np.square(residual)) ** 0.5),
                 "max_action_eV": float(max(residual)),
                 "rms_in_subspace_action_eV": float(

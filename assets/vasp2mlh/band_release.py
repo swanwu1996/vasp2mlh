@@ -1,27 +1,31 @@
-"""Build and qualify a fixed-basis scalar band model against independent VASP energies."""
+"""Build fixed-basis band models and qualify their spectra against independent VASP states."""
 
 import json
 import os
+import shutil
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from xml.etree.ElementTree import ParseError
 
 import h5py
 import numpy as np
-from ase.io import write
+from ase.io import read, write
 
 from . import __version__
 from .comparison import periodic_match
+from .configuration import BOUNDED_COLLINEAR
 from .filtering import filter_model
 from .locality import locality_model, PBE_ANCHORED, PRIOR_OFFSET_EV, WINDOW_FIRST_BUFFER
 from .overlap import overlap
 from .pipeline import bands, build, file_sha256, output_file, projection_header
 from .registry import fingerprint, inspect_basis, read_registry
 from .sparse import sparsify
+from .spillage import basis_quality
 from .vasp import check_hubbard, is_hubbard, is_hybrid, spectral_mode, metadata, screened_hybrid_maturity, split_mesh
 
 
-def check_scalar(meta):
+def check_scalar(meta, *, collinear=False):
     settings = meta["operator_parameters"]
     if meta["lreal"] not in ("F", ".FALSE."):
         raise ValueError(
@@ -32,7 +36,7 @@ def check_scalar(meta):
     if hubbard:
         check_hubbard(meta)
     if (
-        meta["nspin"] not in ((1, 2) if hubbard else (1,))
+        meta["nspin"] not in ((1, 2) if collinear or hubbard else (1,))
         or meta["spinor"]
         or meta["soc"]
         or any(
@@ -43,7 +47,7 @@ def check_scalar(meta):
         or settings.get("XC", "") not in ("", "--", "NONE")
     ):
         raise ValueError(
-            "Band release requires scalar nonmagnetic semilocal LDA/GGA with reciprocal PAW projectors; custom XC combinations are unsupported"
+            "Band release requires scalar or collinear semilocal LDA/GGA with reciprocal PAW projectors; custom XC combinations are unsupported"
         )
     if settings.get("GGA") in ("LI", "LIBXC") and not settings.get("LIBXC1"):
         raise ValueError("Missing Libxc functional identity in VASP XML")
@@ -55,7 +59,7 @@ def check_hybrid(meta):
     if is_hubbard(meta):
         raise ValueError("Combined hybrid and DFT+U is unsupported")
     scalar_settings = {**settings, "LHFCALC": "F"}
-    check_scalar({**meta, "operator_parameters": scalar_settings})
+    check_scalar({**meta, "operator_parameters": scalar_settings}, collinear=False)
     if meta["icharg"] not in (0, 1, 2):
         raise ValueError(
             "Hybrid bands require self-consistent occupied orbitals (ICHARG=0, 1 or 2)"
@@ -234,7 +238,7 @@ def reference_points(src, reference):
             src["kpoints"], ref["kpoints"], time_reversal=not src.get("spinor")
         )
     ref = metadata(reference / "vasprun.xml")
-    check_scalar(ref)
+    check_scalar(ref, collinear=True)
     check_convergence(ref, reference)
     if ref["icharg"] != 11:
         raise ValueError("Use an ICHARG=11 fixed-density validation run")
@@ -324,12 +328,66 @@ def check_source(src, run):
         check_hybrid(src)
         check_convergence(src, run)
         return
-    check_scalar(src)
+    check_scalar(src, collinear=True)
     check_convergence(src, run)
     if src["icharg"] != 11 and not (
         src["icharg"] in (0, 1, 2) and src["writes_charge"]
     ):
         raise ValueError("Source must use ICHARG=11 or write its converged SCF density")
+
+
+def prepare_full_mesh(run, destination):
+    """Stage a nonmagnetic semilocal fixed-density VASP run on the original full grid."""
+    run, dest = Path(run), Path(destination)
+    if dest.exists() or dest.is_symlink():
+        raise ValueError("Choose a new directory for full-mesh inputs")
+    src = metadata(run / "vasprun.xml")
+    check_scalar(src, collinear=False)
+    check_convergence(src, run)
+    if is_hubbard(src) or src["icharg"] not in (0, 1, 2) or not src["writes_charge"]:
+        raise ValueError("Full-mesh preparation requires a converged nonmagnetic LDA/GGA density")
+    from .basis import read_potcar
+
+    geometry = read(run / "CHGCAR", format="vasp")
+    atoms = src["atoms"]
+    pots = read_potcar(run / "POTCAR")
+    if (not np.array_equal(geometry.numbers, atoms.numbers)
+            or not np.allclose(geometry.cell, atoms.cell, rtol=0, atol=1e-7)
+            or not periodic_match(geometry.get_scaled_positions(), atoms.get_scaled_positions()).all()
+            or set(pots) != set(src["titles"])
+            or any(pot.title.split() != src["titles"][sym].split() for sym, pot in pots.items())):
+        raise ValueError("Charge geometry or PAW identities differ from the source XML")
+    xml = ET.parse(run / "vasprun.xml").getroot()
+    generation = xml.find("./kpoints/generation")
+    mesh = src["mesh"]
+    if generation is None or mesh is None or generation.get("param") not in ("Gamma", "Monkhorst-Pack"):
+        raise ValueError("Expected a regular Gamma or Monkhorst-Pack grid in the source XML")
+    shift = generation.findtext("v[@name='usershift']", "0 0 0").split()
+    if len(shift) != 3 or not np.isfinite(np.asarray(shift, dtype=float)).all():
+        raise ValueError("Invalid k-mesh shift")
+    incar = xml.find("incar")
+    if incar is None:
+        raise ValueError("Missing INCAR echo in source XML")
+    controls = {node.attrib["name"]: " ".join(node.text.split()) for node in incar
+                if node.tag in ("i", "v") and node.text and node.text.strip()}
+    controls.update(ICHARG="11", ISTART="0", ISYM="-1", NSW="0", IBRION="-1",
+                    LREAL="F", LWAVE="T", LCHARG="F", WRT_POTENTIAL="total paw",
+                    NBANDS=str(src["eig"].shape[-1]))
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with TemporaryDirectory(dir=dest.parent) as tmp:
+        stage = Path(tmp) / "input"
+        stage.mkdir()
+        for name in ("CHGCAR", "POTCAR"):
+            if not (run / name).stat().st_size:
+                raise ValueError(f"Empty source {name}")
+            shutil.copyfile(run / name, stage / name)
+        write(stage / "POSCAR", src["atoms"], format="vasp", direct=True)
+        (stage / "INCAR").write_text("".join(f"{key} = {value}\n" for key, value in controls.items()))
+        (stage / "KPOINTS").write_text(
+            "Full source mesh\n0\n" + generation.get("param") + "\n" +
+            " ".join(map(str, mesh)) + "\n" + " ".join(shift) + "\n"
+        )
+        stage.rename(dest)
 
 
 def resolve_pbe_run(src, run, pbe_run, method, retained_policy=None):
@@ -438,7 +496,7 @@ def check_pbe_pair(src, run, directory, mesh=None):
         raise ValueError(
             "pbe_run contains a hybrid calculation (LHFCALC=T); supply semilocal PBE"
         )
-    check_scalar(pbe)
+    check_scalar(pbe, collinear=False)
     if pbe["icharg"] not in (0, 1, 2):
         raise ValueError("pbe_run requires a self-consistent scalar PBE calculation")
     check_convergence(pbe, directory)
@@ -547,7 +605,7 @@ def reconstruct(
     src = metadata(run / "vasprun.xml")
     check_source(src, run)
     if cutoff is None:
-        cutoff = 18.0 if is_hubbard(src) else 12.0
+        cutoff = 18.0 if is_hubbard(src) or completion_method == BOUNDED_COLLINEAR else 12.0
     pbe_dir = resolve_pbe_run(src, run, pbe_run, completion_method, retained_policy)
     if completion_method == "auto":
         completion_method = None
@@ -581,13 +639,16 @@ def reconstruct(
         raise ValueError(
             "Spectral projection uses the source WAVECAR; omit potential_run"
         )
-    if completion_method not in (None, PBE_ANCHORED, "spectral-ritz", "locality-constrained"):
-        raise ValueError(f"Unknown hybrid method {completion_method}")
+    bounded_collinear = completion_method == BOUNDED_COLLINEAR
+    if bounded_collinear and (src["nspin"] != 2 or mode or is_hubbard(src) or energy_window is None):
+        raise ValueError(f"{BOUNDED_COLLINEAR} requires two collinear semilocal channels without U and an energy window")
+    if completion_method not in (None, PBE_ANCHORED, BOUNDED_COLLINEAR, "spectral-ritz", "locality-constrained"):
+        raise ValueError(f"Unknown completion method {completion_method}")
     auto_centre = centre_offset is None
     if auto_centre:
         centre_offset = 6.0
     localized = mode is not None and completion_method != "spectral-ritz"
-    if completion_method is not None and mode is None:
+    if completion_method is not None and mode is None and not bounded_collinear:
         raise ValueError(
             "Choosing a completion method requires a hybrid or noncollinear source"
         )
@@ -596,13 +657,13 @@ def reconstruct(
     ):
         raise ValueError("Set completion_method='spectral-ritz' to use Ritz filter controls")
     if floor is None:
-        floor = 0.0001 if mode else 0.005
+        floor = 0.0001 if mode or bounded_collinear else 0.005
     if pbe_dir is not None:
         pbe_hashes = pbe_input_hashes(pbe_dir)
         pbe = check_pbe_pair(src, run, pbe_dir, mesh)
     inputs_for_hash = ("POTCAR", "WAVECAR") if mode else ("POTCAR", "CHGCAR")
     hashes = {name: file_sha256(run / name) for name in inputs_for_hash}
-    if is_hubbard(src) and not mode:
+    if not mode and (is_hubbard(src) or src["nspin"] == 2):
         hashes.update(WAVECAR=file_sha256(run / "WAVECAR"), potential_h5=file_sha256(potential / "vaspout.h5"))
     if reference is not None:
         ref, selected = reference_data(src, reference, hashes)
@@ -629,14 +690,14 @@ def reconstruct(
         or np.any(src["eig"][:, :, -1] <= abs_window[1])
     ):
         raise ValueError("Source VASP spectrum must extend above the energy window")
-    hubbard_recipe = None
-    if is_hubbard(src):
+    window_recipe = None
+    if is_hubbard(src) or bounded_collinear:
         upper = (
             abs_window[1]
             if abs_window is not None
             else float(np.max(src["eig"][:, :, band_range[1] - 1]))
         )
-        hubbard_recipe = dict(
+        window_recipe = dict(
             method="window-bounded-paw-v1",
             band_range_1based=band_range,
             energy_window_from_fermi_eV=energy_window,
@@ -646,7 +707,9 @@ def reconstruct(
         )
         if auto_centre and mode is None:
             centre_offset = max(6.0, upper + 2.0 - src["efermi"])
-            hubbard_recipe["filter_centre_policy"] = "max-fermi-plus-6-or-target-plus-2"
+            window_recipe["filter_centre_policy"] = "max-fermi-plus-6-or-target-plus-2"
+    if not mode and src["efermi"] + centre_offset > float(src["eig"][:, :, -1].min()) + 1e-4:
+        raise ValueError("Filter centre exceeds the available VASP band ceiling. Increase NBANDS or lower centre_offset.")
     if mode and not localized:
         ceiling = src["efermi"] + centre_offset + 2 * taper
         if np.any(src["eig"][0, :, -1] < ceiling):
@@ -681,6 +744,8 @@ def reconstruct(
             else 0.0,
             on_kpoint=on_kpoint,
         )
+        with h5py.File(d / "direct.h5") as trial:
+            coverage = basis_quality(trial, band_range, abs_window)
         if on_stage is not None:
             on_stage("Compute AO overlap")
         overlap(d / "geometry.vasp", registry, d / "overlap.h5", order=96)
@@ -719,7 +784,7 @@ def reconstruct(
                 d / "filtered.h5",
                 band_range,
                 energy_window,
-                hubbard_recipe=hubbard_recipe,
+                hubbard_recipe=window_recipe,
                 pbe_model=pbe_model,
                 retained_policy=retained_policy,
             )
@@ -733,7 +798,8 @@ def reconstruct(
                 floor,
                 taper,
                 spectral=bool(mode),
-                hubbard_recipe=hubbard_recipe,
+                hubbard_recipe=window_recipe if is_hubbard(src) else None,
+                collinear_recipe=window_recipe if bounded_collinear else None,
             )
         if on_stage is not None:
             on_stage("Sparsify H(R)")
@@ -774,16 +840,25 @@ def reconstruct(
             basis = inspect_basis(model, expected)
             if on_stage is not None:
                 on_stage("Validate source mesh")
-            mesh_score, mesh_pairs = score_window(
-                model,
-                model["k/points"][:],
-                src["eig"],
-                band_range,
-                abs_window,
-                max_rmse,
-                max_error,
-                independent=False,
-            )
+            try:
+                mesh_score, mesh_pairs = score_window(
+                    model,
+                    model["k/points"][:],
+                    src["eig"],
+                    band_range,
+                    abs_window,
+                    max_rmse,
+                    max_error,
+                    independent=False,
+                )
+            except ValueError as exc:
+                worst = coverage["worst_target_subspace"]
+                if worst is None:
+                    raise
+                raise ValueError(
+                    f"{exc}. Weakest source PAW target-subspace weight {worst['weight']:.5g} "
+                    f"at k={worst['k']}, spin {worst['spin_1based']}, bands {worst['band_range_1based']}"
+                ) from exc
             report = dict(
                 profile=f"{mode}-spectral-reconstruction/1"
                 if mode
@@ -805,6 +880,7 @@ def reconstruct(
                 basis=basis,
                 cutoff_reference_eV=float(model.attrs["interpolation_reference_eV"]),
                 source_mesh_score=mesh_score,
+                source_basis_quality=coverage,
                 rmse_limit_eV=max_rmse,
                 max_limit_eV=max_error,
                 registry_sha256=json.loads(model.attrs["basis_config"])[
@@ -836,7 +912,7 @@ def reconstruct(
                 report.update(
                     source_functional="DFT+U",
                     hubbard_maturity="experimental" if src["spinor"] else "beta",
-                    hubbard_recipe=hubbard_recipe,
+                    hubbard_recipe=window_recipe,
                     hubbard_by_element=src["operator_parameters"]["HUBBARD_BY_ELEMENT"],
                     spin_channels=src["nspin"],
                 )
@@ -855,6 +931,17 @@ def reconstruct(
                             np.max(model["k/operator_edge_residual_norm_eV"])
                         ),
                     )
+            if src["nspin"] == 2 and not is_hubbard(src):
+                report.update(
+                    profile="collinear-paw-reconstruction/1",
+                    collinear_maturity="experimental",
+                    spin_channels=2,
+                    operator_source="vaspout.h5:results/paw/dij",
+                    paw_rayleigh_max_eV=float(np.max(model["k/operator_edge_rayleigh_error_eV"])),
+                    paw_residual_max_eV=float(np.max(model["k/operator_edge_residual_norm_eV"])),
+                )
+            if bounded_collinear:
+                report["collinear_recipe"] = window_recipe
             report["completion_method"] = str(model.attrs["hamiltonian_method"])
             report.update(screened_hybrid_maturity(src))
             if localized:
@@ -934,7 +1021,7 @@ def reconstruct(
             mesh_group = group.create_group("source_mesh")
             for name, values in mesh_pairs.items():
                 mesh_group[name] = values
-        if reference is not None and is_hubbard(src):
+        if reference is not None:
             from .operator_action import independent_action
 
             report["operator_action"] = independent_action(

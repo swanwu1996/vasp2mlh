@@ -21,6 +21,7 @@ from .band_release import default_reference, check_source, reconstruct, referenc
 from .basis import radial_backend
 from .configuration import (
     BATCH_CONTROLS,
+    BOUNDED_COLLINEAR,
     DEFAULT_ENERGY_WINDOW,
     backend_setting,
     load_config,
@@ -74,7 +75,10 @@ def read_jobs(manifest, config=None):
         },
         "projection": {"cutoff", "mesh", "complement"},
     }
-    modes["hybrid"] = modes["noncollinear"] = modes["validated"] | {"completion_method"}
+    modes["validated"].add("completion_method")
+    modes["noncollinear"] = modes["validated"].copy()
+    modes["hybrid"] = modes["noncollinear"]
+    modes["validated"].add("completion_method")
     modes["hybrid"] = modes["hybrid"] | {"retained_policy"}
     if (
         not isinstance(requested_mode, str)
@@ -178,8 +182,10 @@ def read_jobs(manifest, config=None):
                 if value not in ("window-first-buffer-2", "global-buffer-1"):
                     raise ValueError(f"Unknown retained policy for job {label}")
             elif key == "completion_method":
-                if value not in ("spectral-ritz", "locality-constrained", "pbe-anchored-v1"):
-                    raise ValueError(f"Unknown hybrid method for job {label}")
+                choices = ((BOUNDED_COLLINEAR,) if mode == "validated"
+                           else ("spectral-ritz", "locality-constrained", "pbe-anchored-v1"))
+                if value not in choices:
+                    raise ValueError(f"Invalid completion method for job {label}")
             elif key == "relative_pruning":
                 if type(value) is not bool:
                     raise ValueError(f"{key} must be true or false")
@@ -220,11 +226,9 @@ def input_paths(job):
     ]
     if job["mode"] == "validated":
         potential, reference = job["potential_run"], job["reference"]
-        if (reference / "WAVECAR").is_file():
-            from .vasp import is_hubbard
-
-            if is_hubbard(metadata(source / "vasprun.xml")):
-                paths.append(reference / "WAVECAR")
+        wave = reference / "WAVECAR"
+        if wave.is_file() and wave.stat().st_size:
+            paths.append(wave)
         paths += [source / "CHGCAR", potential / "vaspout.h5"]
         for folder in (potential, reference):
             paths.extend(folder / n for n in ("vasprun.xml", "POTCAR", "CHGCAR"))
@@ -276,7 +280,16 @@ def convert(job, output, threads, backend=None, fast_resume=False):
     target = output / (label + ".h5")
     receipt = output / ".batch" / (label + ".json")
     try:
-        with backend_setting(backend), threadpool_limits(limits=threads):
+        # Direct API callers can run inside an already initialized BLAS process.
+        # Never grow OpenBLAS beyond its explicitly configured startup workspace.
+        startup = os.environ.get("OPENBLAS_NUM_THREADS", "")
+        limits = {"blas": threads, "openmp": threads}
+        if startup.isdecimal() and 0 < int(startup) < threads:
+            from threadpoolctl import threadpool_info
+            for pool in threadpool_info():
+                if pool["internal_api"] == "openblas":
+                    limits[pool["prefix"]] = int(startup)
+        with backend_setting(backend), threadpool_limits(limits=limits):
             if "input_error" in job:
                 raise ValueError(job["input_error"])
             files = input_paths(job)
@@ -306,6 +319,7 @@ def convert(job, output, threads, backend=None, fast_resume=False):
             )
             signature = {
                 "version": __version__,
+                "validation_revision": 3,
                 "mode": mode,
                 "options": job["options"],
                 "backend": radial_backend(),
@@ -375,16 +389,16 @@ def convert(job, output, threads, backend=None, fast_resume=False):
                     )
                     metrics = {
                         k: report[k]
-                        for k in ("rmse_eV", "max_error_eV", "observations")
+                        for k in ("rmse_eV", "max_error_eV", "observations", "source_basis_quality", "operator_action")
+                        if k in report
                     }
                     if report.get("source_functional") == "DFT+U":
                         metrics.update(
                             source_functional="DFT+U",
                             hubbard_maturity=report["hubbard_maturity"],
-                            operator_action=report["operator_action"],
                         )
-                        if "spin_scores" in report:
-                            metrics["spin_scores"] = report["spin_scores"]
+                    if "spin_scores" in report:
+                        metrics["spin_scores"] = report["spin_scores"]
                 else:
                     options = job["options"].copy()
                     cutoff = options.pop("cutoff", None)
@@ -488,6 +502,10 @@ def preflight(job):
                 f"Batch mode {job['mode']} disagrees with source mode {spectral_mode(src) or 'validated'}"
             )
         check_source(src, run)
+        if job["options"].get("completion_method") == BOUNDED_COLLINEAR:
+            from .vasp import is_hubbard
+            if src["nspin"] != 2 or is_hubbard(src) or "energy_window" not in job["options"]:
+                raise ValueError(f"{BOUNDED_COLLINEAR} requires collinear semilocal data without U and an energy window")
     wave, _ = projection_header(run, src, job["options"].get("mesh"))
     symbols = src["atoms"].get_chemical_symbols()
     basis = read_registry(job["registry"], symbols)

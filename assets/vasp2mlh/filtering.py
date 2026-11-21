@@ -8,6 +8,7 @@ import numpy as np
 from scipy.linalg import block_diag, eigh
 from scipy.special import expit
 
+from .configuration import BOUNDED_COLLINEAR
 from .calibrate import metric_factors, ordinary_geometry, write_ordinary
 from .model import adjoint, spin_rotation
 from .pipeline import file_sha256, output_file
@@ -66,7 +67,7 @@ def filtered_operator(
 
 
 def filter_model(
-    model, overlap, output, centre_offset, width, floor, taper, *, spectral=False, hubbard_recipe=None
+    model, overlap, output, centre_offset, width, floor, taper, *, spectral=False, hubbard_recipe=None, collinear_recipe=None
 ):
     if Path(output).resolve() in {Path(p).resolve() for p in (model, overlap)}:
         raise ValueError("Choose a separate output")
@@ -79,7 +80,7 @@ def filter_model(
             src.attrs.get("format") != "vasp2mlh/1"
             or src.attrs.get("hamiltonian_method", "spectral") not in (("spectral",) if spectral else ("direct_scalar_paw", "direct_hubbard_paw"))
             or ov.attrs.get("format") != "vasp2mlh/overlap/1"
-            or (src["k/H"].shape[0] != 1 and src.attrs.get("hamiltonian_method") != "direct_hubbard_paw")
+            or src["k/H"].shape[0] not in ((1,) if spectral else (1, 2))
             or "subspace" in src
         ):
             raise ValueError(
@@ -90,6 +91,12 @@ def filter_model(
             and hubbard_recipe is None
         ):
             raise ValueError("Use v2h with the target energy window for a DFT+U reconstruction")
+        if collinear_recipe is not None and (
+            src.attrs.get("hamiltonian_method") != "direct_scalar_paw"
+            or src["k/H"].shape[0] != 2 or spectral or hubbard_recipe is not None
+        ):
+            raise ValueError("A collinear window requires a two-channel direct semilocal operator")
+        bound = collinear_recipe if collinear_recipe is not None else hubbard_recipe
         spinor = bool(src.attrs.get("spinor", False))
         if (
             spectral
@@ -153,8 +160,8 @@ def filter_model(
                     effective = filtered_operator(
                         h, v, energy, centre, width, floor, ceiling, taper
                     )
-                    if hubbard_recipe is not None:
-                        effective = bound_hubbard_spectrum(effective, hubbard_recipe)
+                    if bound is not None:
+                        effective = bound_hubbard_spectrum(effective, bound)
                     hnew[spin, i] = root @ effective @ root
                     # Preserve the bare AO projection convention of ordinary-metric archives.
                     out["k/projection"][spin, i] = root @ v
@@ -180,7 +187,10 @@ def filter_model(
                 overlap_sha256=file_sha256(overlap),
             )
 
-            if hubbard_recipe is not None:
+            if collinear_recipe is not None:
+                out.attrs["hamiltonian_method"] = BOUNDED_COLLINEAR
+                out.attrs["collinear_recipe"] = json.dumps(collinear_recipe)
+            elif hubbard_recipe is not None:
                 out.attrs["hubbard_recipe"] = json.dumps(hubbard_recipe)
             if spinor:
                 out.attrs["source_saxis"] = src.attrs["saxis"]

@@ -9,7 +9,7 @@ import h5py
 import numpy as np
 
 from .band_release import default_reference, reference_data, score_window, pbe_input_hashes, resolve_pbe_run
-from .configuration import DEFAULT_ENERGY_WINDOW
+from .configuration import BOUNDED_COLLINEAR, DEFAULT_ENERGY_WINDOW
 from .pipeline import file_sha256, output_file, paths_collide
 from .vasp import metadata, screened_hybrid_maturity
 
@@ -82,11 +82,12 @@ def validate_sample(args, config):
             provenance.update(maturity)
             pbe_run = getattr(args, "pbe_run", None)
             method = getattr(args, "completion_method", None)
-            if method in ("locality-constrained", "spectral-ritz"):
+            if method in ("locality-constrained", "spectral-ritz", BOUNDED_COLLINEAR):
                 recorded_method = provenance.get(
                     "completion_method", model.attrs.get("hamiltonian_method")
                 )
                 accepted = {
+                    BOUNDED_COLLINEAR: {BOUNDED_COLLINEAR},
                     "locality-constrained": {"locality_constrained_paw"},
                     "spectral-ritz": {"spinor_spectral_ritz", "hybrid_spectral_ritz"},
                 }
@@ -118,7 +119,7 @@ def validate_sample(args, config):
                     file_sha256(potential / "vaspout.h5") != hashes["potential_h5"]
                     or file_sha256(run / "WAVECAR") != hashes["WAVECAR"]
                 ):
-                    raise ValueError("DFT+U potential or source WAVECAR differs from the recorded conversion")
+                    raise ValueError("PAW potential or source WAVECAR differs from the recorded conversion")
             if not args.reference:
                 reference = default_reference(src, run)
             ref, selected = reference_data(src, reference, provenance["input_sha256"])
@@ -137,7 +138,8 @@ def validate_sample(args, config):
                         "Energy window bounds must be finite and increasing"
                     )
                 absolute = (np.asarray(window) + src["efermi"]).tolist()
-            if "hubbard_recipe" in provenance:
+            bound = provenance.get("collinear_recipe") or provenance.get("hubbard_recipe")
+            if bound is not None:
                 if absolute is not None:
                     top = absolute[1]
                 else:
@@ -149,14 +151,14 @@ def validate_sample(args, config):
                         <= min(src["eig"].shape[-1], ref["eig"].shape[-1])
                     ):
                         raise ValueError(
-                            "Band range exceeds the DFT+U source or reference spectrum"
+                            "Band range exceeds the source or reference spectrum"
                         )
                     top = max(
                         float(np.max(src["eig"][:, :, last - 1])),
                         float(np.max(ref["eig"][:, selected, last - 1])),
                     )
-                if top > provenance["hubbard_recipe"]["linear_through_eV"] + 1e-4:
-                    raise ValueError("Requested bands exceed the stored DFT+U linear energy domain; reconvert for this target")
+                if top > bound["linear_through_eV"] + 1e-4:
+                    raise ValueError("Requested bands exceed the stored linear energy domain; reconvert for this target")
             mesh, _ = score_window(
                 model,
                 src["kpoints"],

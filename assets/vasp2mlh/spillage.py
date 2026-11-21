@@ -6,7 +6,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 from scipy.interpolate import CubicSpline
-from scipy.linalg import block_diag, eigvalsh, solve
+from scipy.linalg import block_diag, cholesky, eigvalsh, solve, solve_triangular
 
 from .configuration import load_config
 from .basis import Shell, read_potcar
@@ -14,6 +14,65 @@ from .model import adjoint, ao_and_metric
 from .pipeline import file_sha256
 from .registry import read_registry, write_registry
 from .vasp import Wavecar, metadata, plane_waves
+
+
+DEGENERACY_EV = 1e-4
+
+
+def complete_multiplets(levels, first, stop):
+    """Expand a nonempty half-open band interval across either degenerate boundary."""
+    while first > 0 and levels[first] - levels[first - 1] <= DEGENERACY_EV:
+        first -= 1
+    while stop < len(levels) and levels[stop] - levels[stop - 1] <= DEGENERACY_EV:
+        stop += 1
+    return slice(first, stop)
+
+
+def basis_quality(model, band_range, absolute_window):
+    """Coverage on the original PAW trial frame, before any spectral completion."""
+    k = model["k"]
+    weights = k["weights"][:]
+    worst = None
+    max_condition = 0.0
+    occupancy = np.clip(k["occupation"][:], 0.0, 1.0) * weights[None, :, None]
+    if band_range is not None and not 1 <= band_range[0] <= band_range[1] <= occupancy.shape[-1]:
+        raise ValueError("Requested band range exceeds available reference states")
+    unrepresented = occupancy * (1.0 - k["projectability"][:])
+    tested = expanded = 0
+    for i, point in enumerate(k["points"]):
+        metric = k["S"][i]
+        values = eigvalsh(metric)
+        max_condition = max(max_condition, float(values[-1] / values[0]))
+        lower = cholesky(metric, lower=True)
+        for spin in range(occupancy.shape[0]):
+            energy = k["eigenvalues"][spin, i]
+            if band_range is None:
+                indices = np.flatnonzero((energy >= absolute_window[0]) & (energy <= absolute_window[1]))
+                if not len(indices):
+                    continue
+                first, stop = int(indices[0]), int(indices[-1]) + 1
+            else:
+                first, stop = band_range[0] - 1, band_range[1]
+            edge = complete_multiplets(energy, first, stop)
+            projection = k["projection"][spin, i, :, edge]
+            components = np.split(projection, 2 if model.attrs["spinor"] else 1)
+            frame = np.vstack([solve_triangular(lower, component, lower=True) for component in components])
+            weight = (float(np.linalg.svd(frame, compute_uv=False)[-1] ** 2)
+                      if frame.shape[1] <= frame.shape[0] else 0.0)
+            tested += 1
+            expanded += int(edge.start != first or edge.stop != stop)
+            if worst is None or weight < worst["weight"]:
+                worst = dict(weight=weight, spin_1based=spin + 1, k=point.tolist(),
+                             band_range_1based=[edge.start + 1, edge.stop])
+    return dict(
+        occupation_weighted_spilling_by_spin=[
+            float(lost.sum() / occ.sum()) if occ.sum() else None
+            for lost, occ in zip(unrepresented, occupancy)
+        ],
+        band_range_1based=band_range, energy_window_absolute_eV=absolute_window,
+        max_paw_overlap_condition=max_condition, worst_target_subspace=worst,
+        k_spin_samples=tested, expanded_multiplets=expanded, degeneracy_eV=DEGENERACY_EV,
+    )
 
 
 def diffuse_shells(shells, selected, widths, radius, taper_start):
@@ -41,8 +100,9 @@ def radial_map(extended, original_count, selected, options):
 
 
 def coverage(samples, transform, condition_limit):
-    weights, occupied, conditions = [], [], []
-    for s, a, nocc, edge in samples:
+    weights, conditions = [], []
+    occupied_weight = occupation_sum = 0.0
+    for s, a, occupation, edge in samples:
         trial = transform.T @ s @ transform
         vals = eigvalsh(trial)
         if vals[0] <= 0 or vals[-1] > condition_limit * vals[0]:
@@ -51,11 +111,15 @@ def coverage(samples, transform, condition_limit):
         projection = transform.T @ a
         gram = adjoint(projection) @ solve(trial, projection, assume_a="pos")
         weights.append(eigvalsh(gram[edge, edge])[0])
-        occupied.append(gram.diagonal().real[:nocc].mean())
+        if np.ndim(occupation) == 0:
+            # Legacy samples supplied the number of fully occupied bands.
+            occupation = (np.arange(len(gram)) < occupation).astype(float)
+        occupied_weight += float(occupation @ gram.diagonal().real)
+        occupation_sum += float(occupation.sum())
     return {
         "worst_edge": float(min(weights)),
         "mean_edge": float(np.mean(weights)),
-        "mean_occupied": float(np.mean(occupied)),
+        "mean_occupied": occupied_weight / occupation_sum if occupation_sum else 0.0,
         "max_condition": float(max(conditions)),
     }
 
@@ -79,15 +143,14 @@ def optimize(run, registry, config, output):
     atoms = meta["atoms"]
     if (
         meta["spinor"]
-        or meta["nspin"] != 1
-        or wave.ns != 1
+        or meta["nspin"] != wave.ns
         or meta["lreal"] not in ("F", ".FALSE.")
         or not np.allclose(wave.cell, atoms.cell, atol=1e-7)
         or not np.isclose(meta["encut"], wave.encut)
-        or meta["eig"].shape != (1, wave.nk, wave.nb)
+        or meta["eig"].shape != (wave.ns, wave.nk, wave.nb)
     ):
         raise ValueError(
-            "Expected a matching scalar WAVECAR with reciprocal PAW projectors"
+            "Expected a matching scalar or collinear WAVECAR with reciprocal PAW projectors"
         )
     symbol = spec["element"]
     pots = read_potcar(run / "POTCAR")
@@ -107,7 +170,6 @@ def optimize(run, registry, config, output):
     cutoff, start = spec["cutoff_A"], spec["taper_start_A"]
     nk = spec.get("k_indices", list(range(wave.nk)))
     first, last = spec["bands"]
-    nocc = int(np.ceil(meta["nelect"] / 2))
     condition = spec["max_condition"]
     samples_n = spec.get("radial_points", 769)
     if (
@@ -125,7 +187,6 @@ def optimize(run, registry, config, output):
         or type(first) is not int
         or type(last) is not int
         or not 1 <= first <= last <= wave.nb
-        or not 1 <= nocc <= wave.nb
         or widths.ndim != 1
         or angles.ndim != 1
         or not len(widths)
@@ -140,25 +201,24 @@ def optimize(run, registry, config, output):
     extended = diffuse_shells(shells, selected, widths, radius, start)
     trials = {**basis, symbol: extended}
     samples = []
-    edge = slice(first - 1, last)
     for i in nk:
-        k, e, c = wave.read(0, i)
-        if not np.allclose(k, meta["kpoints"][i], atol=1e-7, rtol=0) or not np.allclose(
-            e[:, 0], meta["eig"][0, i], atol=1e-4, rtol=0
-        ):
-            raise ValueError("WAVECAR and XML k points or eigenvalues differ")
+        point = meta["kpoints"][i]
         phi, p, d = ao_and_metric(
-            plane_waves(k, wave.cell, wave.encut), atoms, trials, pots, meta["spline"]
+            plane_waves(point, wave.cell, wave.encut), atoms, trials, pots, meta["spline"]
         )
-        c = c[:, : max(last, nocc)]
-        pc = adjoint(p) @ c
-        if (
-            np.max(abs(adjoint(c) @ c + adjoint(pc) @ d @ pc - np.eye(c.shape[1])))
-            > 2e-3
-        ):
-            raise ValueError("Reference states fail the PAW normalization check")
         sphi = phi + p @ (d @ (adjoint(p) @ phi))
-        samples.append((adjoint(phi) @ sphi, adjoint(sphi) @ c, nocc, edge))
+        for spin in range(wave.ns):
+            k, e, c = wave.read(spin, i)
+            if not np.allclose(k, point, atol=1e-7, rtol=0) or not np.allclose(
+                e[:, 0], meta["eig"][spin, i], atol=1e-4, rtol=0
+            ):
+                raise ValueError("WAVECAR and XML k points or eigenvalues differ")
+            edge = complete_multiplets(e[:, 0], first - 1, last)
+            pc = adjoint(p) @ c
+            if np.max(abs(adjoint(c) @ c + adjoint(pc) @ d @ pc - np.eye(wave.nb))) > 2e-3:
+                raise ValueError("Reference states fail the PAW normalization check")
+            occupation = np.clip(e[:, 1], 0.0, 1.0) * meta["weights"][i]
+            samples.append((adjoint(phi) @ sphi, adjoint(sphi) @ c, occupation, edge))
     choices = [
         [
             (len(shells) + j * len(widths) + w, a)

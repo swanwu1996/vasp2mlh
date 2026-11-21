@@ -7,7 +7,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-from .configuration import load_config
+from .configuration import BOUNDED_COLLINEAR, load_config
 from .basis import Shell, load_basis, read_potcar
 from .pipeline import output_file
 from .realspace import SPARSE_FORMAT, structure
@@ -234,14 +234,15 @@ def label_definition(f):
     if method in {"hybrid_spectral_ritz", "spinor_spectral_ritz"}:
         settings.pop("complement_eV")
         settings["complement_policy"] = attrs["complement_policy"]
-    if method in {"hubbard-paw-ritz-v1", "filtered_paw_ritz", "hybrid_spectral_ritz", "spinor_spectral_ritz"}:
+    if method in {BOUNDED_COLLINEAR, "hubbard-paw-ritz-v1", "filtered_paw_ritz", "hybrid_spectral_ritz", "spinor_spectral_ritz"}:
         for key in ("filter_width_eV", "filter_floor", "filter_taper_eV"):
             settings[key] = float(attrs[key])
         settings["centre_offset_eV"] = round(
             float(attrs["filter_centre_eV"] - attrs["fermi_eV"]), 10
         )
-    if "hubbard_recipe" in attrs or method == "hubbard-paw-ritz-v1":
-        recipe = json.loads(attrs["hubbard_recipe"])
+    recipe_key = "collinear_recipe" if method == BOUNDED_COLLINEAR else "hubbard_recipe"
+    if recipe_key in attrs or method in {"hubbard-paw-ritz-v1", BOUNDED_COLLINEAR}:
+        recipe = json.loads(attrs[recipe_key])
         limit = recipe.pop("linear_through_eV")
         target = recipe["energy_window_from_fermi_eV"]
         upper = (
@@ -253,7 +254,7 @@ def label_definition(f):
         # contains the corresponding WAVECAR double precision values.
         tol = 1e-4 if target is None else 1e-7
         if not np.isclose(limit, upper + recipe["upper_buffer_eV"], atol=tol, rtol=0):
-            raise ValueError("Inconsistent DFT+U spectral bound")
+            raise ValueError("Inconsistent target-window spectral bound")
         if recipe.get("filter_centre_policy") == "max-fermi-plus-6-or-target-plus-2":
             if not np.isclose(
                 settings.pop("centre_offset_eV"),
@@ -261,8 +262,8 @@ def label_definition(f):
                 atol=1e-7,
                 rtol=0,
             ):
-                raise ValueError("DFT+U filter centre disagrees with its target window")
-        settings["hubbard_recipe"] = recipe
+                raise ValueError("Filter centre disagrees with its target window")
+        settings[recipe_key] = recipe
     if attrs["format"] == SPARSE_FORMAT:
         report = json.loads(attrs["truncation_report"])
         for key in ("cutoff_A", "h_tol_eV", "s_tol", "relative_pruning"):
