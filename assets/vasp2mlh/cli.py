@@ -13,6 +13,7 @@ from .analysis import held_out, locality, lobster_summary, spectra
 from .sparse import sparsify
 from .export import deeph, deeph_batch, hamgnn
 from .pipeline import bands, build, validate, output_file, paths_collide
+from .validation import independent_report
 
 
 def make_parser():
@@ -223,10 +224,10 @@ def make_parser():
         )
     report = subs.add_parser(
         "band-report",
-        help="show the independent validation report embedded in a reconstructed band model",
+        help="show the independent band validation report for a batch or single-structure model",
     )
     report.add_argument("model")
-    report.add_argument("--output", help="write the embedded validation report to JSON")
+    report.add_argument("--output", help="write a copy of the independent validation report to JSON")
     gen = subs.add_parser(
         "basis-generate",
         help="generate a compact multi-zeta AO registry or legacy PAW reference",
@@ -415,7 +416,7 @@ def make_parser():
     band.add_argument(
         "--validated-window",
         action="store_true",
-        help="emit only the declared model window as kx ky kz band_1based energy_eV rows",
+        help="emit validated kx ky kz band_1based energy_eV rows; two-channel models include spin_0based before band_1based",
     )
     dos = subs.add_parser(
         "dos", help="Gaussian DOS, projected DOS and Lowdin orbital populations"
@@ -634,6 +635,11 @@ def main(argv=None, *, validation_only=False):
         parser.exit(2, f"{program}: {exc}\n")
 
 
+def check_analysis_output(output, *inputs):
+    if paths_collide(output, inputs):
+        raise ValueError(f"Analysis output collides with an input: {output}")
+
+
 def execute(parser, args):
     if args.command == "convert":
         from .conversion import convert_sample
@@ -655,10 +661,10 @@ def execute(parser, args):
         print(json.dumps(reconstruct(**options), indent=2))
     elif args.command == "band-report":
         with h5py.File(args.model) as f:
-            report = json.loads(f["band_validation"].attrs["report"])
+            if args.output:
+                check_analysis_output(args.output, args.model)
+            report = independent_report(f, output=args.output)
         if args.output:
-            if Path(args.output).resolve() == Path(args.model).resolve():
-                raise ValueError("Report output collides with model")
             with output_file(args.output) as tmp:
                 tmp.write_text(json.dumps(report, indent=2) + "\n")
         else:
@@ -719,6 +725,11 @@ def execute(parser, args):
 
         overlap(args.structure, args.basis, args.output, args.potcar, args.order)
     elif args.command == "compare":
+        ref = Path(args.vasp_xml).parent
+        check_analysis_output(
+            args.output, args.model, args.vasp_xml, args.openmx_band,
+            Path(args.openmx_band).with_suffix(".out"), ref / "POTCAR", ref / "CHGCAR",
+        )
         result = compare_path(
             args.model, args.vasp_xml, args.openmx_band, args.edge_bands
         )
@@ -728,6 +739,7 @@ def execute(parser, args):
     elif args.command == "view":
         from .viewer import render
 
+        check_analysis_output(args.output, *args.comparisons)
         render(args.comparisons, args.output)
     elif args.command == "downfold":
         from .downfold import downfold
@@ -773,36 +785,45 @@ def execute(parser, args):
     elif args.command == "hamgnn":
         hamgnn(args.models, args.output, args.nao_max, args.basis_lock)
     elif args.command == "bands":
-        if Path(args.output).resolve() in {
-            Path(args.model).resolve(),
-            Path(args.points).resolve(),
-        }:
-            raise ValueError("Band output collides with the model or k-point input")
+        check_analysis_output(args.output, args.model, args.points)
         k = np.loadtxt(args.points, ndmin=2)
         if k.shape[1] != 3 or not np.isfinite(k).all():
             raise ValueError("Expected finite fractional k-point triples")
         with h5py.File(args.model) as f:
+            if args.validated_window:
+                profile = independent_report(f, output=args.output)
+                if profile.get("status") != "passed":
+                    raise ValueError("Independent validation must pass before exporting a validated window")
             e = bands(f, k)
             if args.validated_window:
-                profile = json.loads(f["band_validation"].attrs["report"])
-                values = e[0]
                 br = profile["band_range_1based"]
                 if br is None:
                     lo, hi = profile["energy_window_absolute_eV"]
-                    if np.any(values[:, -1] <= hi):
+                    if not np.isfinite([lo, hi]).all() or lo >= hi:
+                        raise ValueError("Invalid energy window in validation report")
+                    if np.any(e[:, :, -1] <= hi):
                         raise ValueError(
                             "AO spectrum does not extend above the declared window at all query points"
                         )
-                    mask = (values >= lo) & (values <= hi)
+                    mask = (e >= lo) & (e <= hi)
                 else:
-                    mask = np.zeros(values.shape, dtype=bool)
-                    mask[:, br[0] - 1 : br[1]] = True
-                ki, bi = np.nonzero(mask)
+                    first, last = br
+                    if not 1 <= first <= last <= e.shape[-1]:
+                        raise ValueError("Validated band range exceeds the available levels")
+                    mask = np.zeros(e.shape, dtype=bool)
+                    mask[:, :, first - 1 : last] = True
+                spin, ki, bi = np.nonzero(mask)
+                columns = [k[ki]]
+                header = "kx ky kz"
+                if len(e) > 1:
+                    columns.append(spin)
+                    header += " spin_0based"
+                columns.extend((bi + 1, e[spin, ki, bi]))
                 with output_file(args.output) as tmp:
                     np.savetxt(
                         tmp,
-                        np.column_stack((k[ki], bi + 1, values[ki, bi])),
-                        header="kx ky kz band_1based energy_eV",
+                        np.column_stack(columns),
+                        header=header + " band_1based energy_eV",
                     )
                 return
         with output_file(args.output) as tmp:
@@ -817,6 +838,7 @@ def execute(parser, args):
                 header="kx ky kz spin band_energies_eV",
             )
     elif args.command == "dos":
+        check_analysis_output(args.output, args.model)
         axis, dos, labels, pop = spectra(
             args.model, *args.window, args.step, args.sigma
         )
@@ -828,6 +850,7 @@ def execute(parser, args):
             )
         print(json.dumps(dict(zip(labels, pop)), indent=2))
     elif args.command == "locality":
+        check_analysis_output(args.output, args.model)
         with output_file(args.output) as tmp:
             np.savetxt(
                 tmp,

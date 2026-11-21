@@ -16,8 +16,14 @@ from .vasp import metadata
 
 def held_out(model, xml):
     ref = metadata(xml)
-    selected = np.flatnonzero(ref["weights"] == 0)
-    if not len(selected):
+    if "zero_weight" in ref:
+        points = ref["zero_weight"]["kpoints"]
+        levels = ref["zero_weight"]["eig"]
+    else:
+        selected = ref["weights"] == 0
+        points = ref["kpoints"][selected]
+        levels = ref["eig"][:, selected]
+    if not len(points):
         raise ValueError(
             "Expected zero-weight validation points in a VASP mesh + path calculation"
         )
@@ -32,12 +38,11 @@ def held_out(model, xml):
             or not np.allclose(displacement, np.rint(displacement), atol=1e-7)
             or f.attrs["spinor"] != ref["spinor"]
             or f.attrs["soc"] != ref["soc"]
-            or f.attrs["spin_channels"] != ref["eig"].shape[0]
+            or f.attrs["spin_channels"] != levels.shape[0]
         ):
             raise ValueError("Reference cell, atoms or spin mode differ from model")
         result = []
-        for i in selected:
-            k = ref["kpoints"][i]
+        for i, k in enumerate(points):
             if np.any(
                 np.all(np.abs((f["k/points"][:] - k + 0.5) % 1 - 0.5) < 1e-7, axis=1)
             ):
@@ -49,9 +54,9 @@ def held_out(model, xml):
             row = dict(k=k.tolist(), min_overlap_eigenvalue=float(smin))
             if smin > 0:
                 eig = bands(f, k)[:, 0]
-                n = min(eig.shape[-1], ref["eig"].shape[-1])
-                errors = eig[:, :n] - ref["eig"][:, i, :n]
-                occupied = ref["eig"][:, i, :n] <= ref["efermi"]
+                n = min(eig.shape[-1], levels.shape[-1])
+                errors = eig[:, :n] - levels[:, i, :n]
+                occupied = levels[:, i, :n] <= ref["efermi"]
                 row["lowest_bands_rmse_eV"] = float(np.sqrt(np.mean(errors**2)))
                 if occupied.any():
                     row["below_fermi_rmse_eV"] = float(

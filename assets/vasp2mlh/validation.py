@@ -14,6 +14,25 @@ from .pipeline import file_sha256, output_file, paths_collide
 from .vasp import metadata, screened_hybrid_maturity
 
 
+def independent_report(model, *, output=None):
+    """Read the batch report or the independent report for this single model."""
+    if "band_validation" in model:
+        return json.loads(model["band_validation"].attrs["report"])
+    if "source_validation" not in model:
+        raise ValueError("This model has no independent band validation")
+    path = Path(model.filename).with_name("validation.json")
+    if output is not None and paths_collide(output, [path]):
+        raise ValueError(f"Output collides with the independent validation report: {path}")
+    if not path.is_file():
+        raise ValueError(f"Missing {path}. Run v2h_valid for this model first.")
+    report = json.loads(path.read_text())
+    if not isinstance(report, dict) or report.get("status") not in ("passed", "failed"):
+        raise ValueError(f"Invalid independent validation report: {path}")
+    if report.get("model_sha256") != file_sha256(model.filename):
+        raise ValueError(f"Validation report does not identify this model. Run v2h_valid again: {path}")
+    return report
+
+
 def validate_sample(args, config):
     run = Path(args.run).resolve()
     reference = Path(args.reference) if args.reference else run / "reference"
