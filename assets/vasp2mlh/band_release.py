@@ -14,8 +14,9 @@ from ase.io import read, write
 
 from . import __version__
 from .comparison import periodic_match
-from .configuration import BOUNDED_COLLINEAR, SCALAR_POLAR
-from .filtering import MIN_POLAR_SINGULAR_VALUE, filter_model
+from .configuration import BOUNDED_COLLINEAR, HSE_POLAR, SCALAR_POLAR
+from .filtering import filter_model
+from .polar import MIN_POLAR_SINGULAR_VALUE, hse_polar_model
 from .locality import locality_model, PBE_ANCHORED, PRIOR_OFFSET_EV, WINDOW_FIRST_BUFFER
 from .overlap import overlap
 from .pipeline import bands, build, file_sha256, output_file, projection_header
@@ -398,18 +399,18 @@ def resolve_pbe_run(src, run, pbe_run, method, retained_policy=None):
     ):
         raise ValueError("window-first-buffer-2 requires a scalar screened PBE hybrid source")
     if not screened:
-        if pbe_run is not None or method == PBE_ANCHORED:
+        if pbe_run is not None or method in (PBE_ANCHORED, HSE_POLAR):
             raise ValueError(
-                "pbe_run and pbe-anchored-v1 require a scalar screened PBE hybrid source"
+                "PBE-referenced HSE methods and pbe_run require a scalar screened PBE hybrid source"
             )
         return None
     if src["spinor"] or src["soc"]:
         raise ValueError(
             "The HSE beta method requires a scalar source; hybrid spinors are unsupported"
         )
-    if method not in (None, "auto", PBE_ANCHORED):
+    if method not in (None, "auto", PBE_ANCHORED, HSE_POLAR):
         raise ValueError(
-            "Legacy HSE completion retired. Omit completion_method or use pbe-anchored-v1"
+            "Legacy HSE completion retired. Choose pbe-anchored-v1 or hse-polar-window-v1"
         )
     directory = Path(pbe_run) if pbe_run is not None else run / "pbe"
     if pbe_run is None:
@@ -604,6 +605,9 @@ def reconstruct(
     xml_hash = file_sha256(run / "vasprun.xml")
     src = metadata(run / "vasprun.xml")
     check_source(src, run)
+    hse_polar = completion_method == HSE_POLAR
+    if hse_polar and band_range is None:
+        raise ValueError(f"{HSE_POLAR} requires an ordered band range")
     polar_window = completion_method == SCALAR_POLAR
     if cutoff is None:
         cutoff = 18.0 if is_hubbard(src) or polar_window or completion_method == BOUNDED_COLLINEAR else 12.0
@@ -645,7 +649,7 @@ def reconstruct(
         raise ValueError(f"{SCALAR_POLAR} requires a nonmagnetic semilocal source and an ordered band range")
     if bounded_collinear and (src["nspin"] != 2 or mode or is_hubbard(src) or energy_window is None):
         raise ValueError(f"{BOUNDED_COLLINEAR} requires two collinear semilocal channels without U and an energy window")
-    if completion_method not in (None, PBE_ANCHORED, BOUNDED_COLLINEAR, SCALAR_POLAR, "spectral-ritz", "locality-constrained"):
+    if completion_method not in (None, PBE_ANCHORED, HSE_POLAR, BOUNDED_COLLINEAR, SCALAR_POLAR, "spectral-ritz", "locality-constrained"):
         raise ValueError(f"Unknown completion method {completion_method}")
     auto_centre = centre_offset is None
     if auto_centre:
@@ -782,7 +786,9 @@ def reconstruct(
                 )
             except ValueError as exc:
                 raise ValueError(f"PBE reference completion failed: {exc}") from exc
-        if localized:
+        if hse_polar:
+            hse_polar_model(d / "direct.h5", d / "overlap.h5", pbe_model, d / "filtered.h5", band_range)
+        elif localized:
             locality_model(
                 d / "direct.h5",
                 d / "overlap.h5",
@@ -861,8 +867,15 @@ def reconstruct(
                 worst = coverage["worst_target_subspace"]
                 if worst is None:
                     raise
+                diagnosis = ""
+                if hse_polar:
+                    local = json.loads(model.attrs["polar_source_diagnostics"])
+                    diagnosis = (
+                        f" Before truncation, ordered RMS {local['ordered_rms_eV']:.5g} eV, "
+                        f"complement levels inside target at {local['complement_intrusion_k']}/{local['kpoints']} k points."
+                    )
                 raise ValueError(
-                    f"{exc}. Weakest source PAW target-subspace weight {worst['weight']:.5g} "
+                    f"{exc}.{diagnosis} Weakest source PAW target-subspace weight {worst['weight']:.5g} "
                     f"at k={worst['k']}, spin {worst['spin_1based']}, bands {worst['band_range_1based']}"
                 ) from exc
             report = dict(
@@ -952,7 +965,14 @@ def reconstruct(
                 report["collinear_recipe"] = window_recipe
             report["completion_method"] = str(model.attrs["hamiltonian_method"])
             report.update(screened_hybrid_maturity(src))
-            if localized:
+            if hse_polar:
+                del report["filter_parameters"]
+                report.update(
+                    polar_recipe=json.loads(model.attrs["polar_recipe"]),
+                    polar_source_diagnostics=json.loads(model.attrs["polar_source_diagnostics"]),
+                    polar_maturity="experimental",
+                )
+            elif localized:
                 del report["filter_parameters"]
                 report["profile"] = f"{mode}-locality-reconstruction/1"
                 report["locality_completion"] = dict(
@@ -974,8 +994,7 @@ def reconstruct(
                 }
             if pbe_dir is not None:
                 report.update(
-                    profile="hse-pbe-anchored/1",
-                    completion_method=PBE_ANCHORED,
+                    profile="hse-polar-window/1" if hse_polar else "hse-pbe-anchored/1",
                     pbe_reference=dict(
                         input_sha256=pbe_hashes,
                         mesh=list(pbe["mesh"]),
@@ -985,11 +1004,13 @@ def reconstruct(
                 )
             if retained_policy is not None:
                 report["retained_policy"] = retained_policy
+                if hse_polar:
+                    report["retained_policy_scope"] = "PBE reference"
                 with h5py.File(pbe_model) as baseline:
-                    for target, stage in (
-                        (model, "locality_completion"),
-                        (baseline, "pbe_reference"),
-                    ):
+                    stages = [(baseline, "pbe_reference")]
+                    if not hse_polar:
+                        stages.append((model, "locality_completion"))
+                    for target, stage in stages:
                         counts, frequencies = np.unique(
                             target["locality/retained_by_k"][:], return_counts=True
                         )

@@ -96,6 +96,15 @@ def ordinary_geometry(src, ov):
     return atoms, bounds, r_ao, s_ao, k, s_k
 
 
+def aligned_pbe_reference(pbe, overlap, points, target_fermi):
+    """Evaluate the dense ordinary-AO PBE reference on the target energy zero."""
+    ordinary_geometry(pbe, overlap)
+    offset = float(target_fermi - pbe.attrs["fermi_eV"])
+    translations = pbe["real/R"][:]
+    h_real = pbe["real/H"][0] + offset * pbe["real/S"][:]
+    return offset, (bloch(points, translations, h_real), translations, h_real)
+
+
 def overlap_mesh_alias(mesh_r, mesh_s, exact_r, exact_s):
     """Relative Brillouin-zone RMS error of interpolating the known AO overlap."""
     mesh = {tuple(r): s for r, s in zip(mesh_r, mesh_s)}

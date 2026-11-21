@@ -66,6 +66,7 @@ def load_config(path):
 
 BATCH_CONTROLS = {"workers", "threads", "backend", "check_only", "fast_resume"}
 SCALAR_POLAR = "scalar-polar-window-v1"
+HSE_POLAR = "hse-polar-window-v1"
 BOUNDED_COLLINEAR = "collinear-window-ritz-v1"
 DEFAULT_ENERGY_WINDOW = (-1.0, 2.0)
 

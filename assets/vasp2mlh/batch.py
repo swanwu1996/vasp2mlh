@@ -23,6 +23,7 @@ from .configuration import (
     BATCH_CONTROLS,
     BOUNDED_COLLINEAR,
     SCALAR_POLAR,
+    HSE_POLAR,
     DEFAULT_ENERGY_WINDOW,
     backend_setting,
     load_config,
@@ -183,8 +184,11 @@ def read_jobs(manifest, config=None):
                 if value not in ("window-first-buffer-2", "global-buffer-1"):
                     raise ValueError(f"Unknown retained policy for job {label}")
             elif key == "completion_method":
-                choices = ((BOUNDED_COLLINEAR, SCALAR_POLAR) if mode == "validated"
-                           else ("spectral-ritz", "locality-constrained", "pbe-anchored-v1"))
+                choices = {
+                    "validated": (BOUNDED_COLLINEAR, SCALAR_POLAR),
+                    "hybrid": ("spectral-ritz", "locality-constrained", "pbe-anchored-v1", HSE_POLAR),
+                    "noncollinear": ("spectral-ritz", "locality-constrained"),
+                }[mode]
                 if value not in choices:
                     raise ValueError(f"Invalid completion method for job {label}")
             elif key == "relative_pruning":
@@ -503,6 +507,8 @@ def preflight(job):
                 f"Batch mode {job['mode']} disagrees with source mode {spectral_mode(src) or 'validated'}"
             )
         check_source(src, run)
+        if job["options"].get("completion_method") == HSE_POLAR and "band_range" not in job["options"]:
+            raise ValueError(f"{HSE_POLAR} requires an ordered band range")
         if job["options"].get("completion_method") == SCALAR_POLAR:
             if src["nspin"] != 1 or is_hubbard(src) or "band_range" not in job["options"]:
                 raise ValueError(f"{SCALAR_POLAR} requires nonmagnetic semilocal data and an ordered band range")

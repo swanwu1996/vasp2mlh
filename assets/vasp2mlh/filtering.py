@@ -9,14 +9,11 @@ from scipy.linalg import block_diag, eigh
 from scipy.special import expit
 
 from .configuration import BOUNDED_COLLINEAR, SCALAR_POLAR
-from .spillage import complete_multiplets
+from .polar import MIN_POLAR_SINGULAR_VALUE, anchor_polar_window  # re-export the scalar API
 from .calibrate import metric_factors, ordinary_geometry, write_ordinary
 from .model import adjoint, spin_rotation
 from .pipeline import file_sha256, output_file
 from .vasp import is_hybrid
-
-
-MIN_POLAR_SINGULAR_VALUE = 1e-6
 
 
 def bound_hubbard_spectrum(h, recipe):
@@ -27,24 +24,6 @@ def bound_hubbard_spectrum(h, recipe):
     high = values > edge
     values[high] = edge + width * np.tanh((values[high] - edge) / width)
     return (vectors * values[..., None, :]) @ adjoint(vectors)
-
-
-def anchor_polar_window(prior, projections, energies, band_range):
-    """Impose native eigenpairs on the closest orthonormal bare PAW target frame."""
-    first, last = band_range
-    if not 1 <= first <= last <= min(len(prior), len(energies)):
-        raise ValueError("Polar window exceeds the ordered AO or VASP spectrum")
-    edge = complete_multiplets(energies, first - 1, last)
-    if edge.stop == len(energies):
-        raise ValueError("Increase NBANDS to resolve the upper polar-window multiplet")
-    columns = projections[:, edge]
-    left, singular, right = np.linalg.svd(columns, full_matrices=False)
-    if len(singular) < columns.shape[1] or singular[-1] < MIN_POLAR_SINGULAR_VALUE:
-        raise ValueError("Polar-window PAW projection is rank deficient")
-    frame = left @ right
-    complement = np.eye(len(prior)) - frame @ adjoint(frame)
-    anchored = (frame * energies[edge]) @ adjoint(frame) + complement @ prior @ complement
-    return (anchored + adjoint(anchored)) / 2
 
 
 def upper_taper(energies, ceiling, taper):

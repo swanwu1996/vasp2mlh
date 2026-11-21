@@ -9,9 +9,9 @@ from ase.geometry import minkowski_reduce
 from scipy.linalg import block_diag
 from scipy.spatial import ConvexHull, Voronoi
 
-from .calibrate import metric_factors, ordinary_geometry, write_ordinary
+from .calibrate import aligned_pbe_reference, metric_factors, ordinary_geometry, write_ordinary
 from .filtering import bound_hubbard_spectrum
-from .model import adjoint, bloch, mesh_indices, spin_rotation
+from .model import adjoint, mesh_indices, spin_rotation
 from .pipeline import output_file, paths_collide
 
 PBE_ANCHORED = "pbe-anchored-v1"
@@ -291,14 +291,9 @@ def locality_model(model, overlap_file, output, band_range, energy_window, *, pb
             reference = None
             if pbe_model is not None:
                 with h5py.File(pbe_model) as pbe:
-                    ordinary_geometry(pbe, ov)
-                    offset = ef - pbe.attrs["fermi_eV"]
-                    ref_r = pbe["real/R"][:]
-                    ref_h = pbe["real/H"][0] + offset * pbe["real/S"][:]
-                    ref_k = bloch(k, ref_r, ref_h)
+                    offset, reference = aligned_pbe_reference(pbe, ov, k, ef)
                     inv_roots = np.linalg.inv(roots)
-                    prior = inv_roots @ ref_k @ inv_roots
-                    reference = (ref_k, ref_r, ref_h)
+                    prior = inv_roots @ reference[0] @ inv_roots
             h, weights, steps = complete_subspace(
                 k,
                 src["k/mesh"][:],

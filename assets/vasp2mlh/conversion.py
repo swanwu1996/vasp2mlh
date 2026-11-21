@@ -110,7 +110,9 @@ def convert_sample(args):
         )
         result.rename(output)
         bar.update(1)
-    if report.get("screened_hybrid_maturity") == "beta":
+    if report.get("profile") == "hse-polar-window/1":
+        print(f"HSE reconstruction: {report['completion_method']} (experimental)")
+    elif report.get("screened_hybrid_maturity") == "beta":
         print(f"HSE reconstruction: {report['completion_method']} / {report.get('retained_policy', 'global-buffer-1')} (beta)")
     if report.get("source_functional") == "DFT+U":
         print(f"DFT+U reconstruction: {report['completion_method']} ({report['hubbard_maturity']})")

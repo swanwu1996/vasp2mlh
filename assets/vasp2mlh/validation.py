@@ -9,7 +9,7 @@ import h5py
 import numpy as np
 
 from .band_release import default_reference, reference_data, score_window, pbe_input_hashes, resolve_pbe_run
-from .configuration import BOUNDED_COLLINEAR, DEFAULT_ENERGY_WINDOW, SCALAR_POLAR
+from .configuration import BOUNDED_COLLINEAR, DEFAULT_ENERGY_WINDOW, HSE_POLAR, SCALAR_POLAR
 from .pipeline import file_sha256, output_file, paths_collide
 from .vasp import metadata, screened_hybrid_maturity
 
@@ -82,12 +82,14 @@ def validate_sample(args, config):
             provenance.update(maturity)
             pbe_run = getattr(args, "pbe_run", None)
             method = getattr(args, "completion_method", None)
-            if method in ("locality-constrained", "spectral-ritz", BOUNDED_COLLINEAR, SCALAR_POLAR):
+            if method in ("locality-constrained", "spectral-ritz", "pbe-anchored-v1", HSE_POLAR, BOUNDED_COLLINEAR, SCALAR_POLAR):
                 recorded_method = provenance.get(
                     "completion_method", model.attrs.get("hamiltonian_method")
                 )
                 accepted = {
                     SCALAR_POLAR: {SCALAR_POLAR},
+                    HSE_POLAR: {HSE_POLAR},
+                    "pbe-anchored-v1": {"pbe-anchored-v1"},
                     BOUNDED_COLLINEAR: {BOUNDED_COLLINEAR},
                     "locality-constrained": {"locality_constrained_paw"},
                     "spectral-ritz": {"spinor_spectral_ritz", "hybrid_spectral_ritz"},
@@ -111,7 +113,7 @@ def validate_sample(args, config):
                     raise ValueError(
                         "PBE reference inputs differ from the model's recorded PBE source"
                     )
-            elif pbe_run is not None or method == "pbe-anchored-v1":
+            elif pbe_run is not None or method in ("pbe-anchored-v1", HSE_POLAR):
                 raise ValueError("This model was not built with the specified PBE anchor")
             hashes = provenance["input_sha256"]
             if "potential_h5" in hashes:
@@ -140,7 +142,7 @@ def validate_sample(args, config):
                     )
                 absolute = (np.asarray(window) + src["efermi"]).tolist()
             bound = provenance.get("polar_recipe") or provenance.get("collinear_recipe") or provenance.get("hubbard_recipe")
-            if bound is not None:
+            if bound is not None and "linear_through_eV" in bound:
                 if absolute is not None:
                     top = absolute[1]
                 else:

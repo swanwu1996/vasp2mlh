@@ -7,7 +7,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-from .configuration import BOUNDED_COLLINEAR, SCALAR_POLAR, load_config
+from .configuration import BOUNDED_COLLINEAR, HSE_POLAR, SCALAR_POLAR, load_config
 from .basis import Shell, load_basis, read_potcar
 from .pipeline import output_file
 from .realspace import SPARSE_FORMAT, structure
@@ -217,6 +217,8 @@ def label_definition(f):
     ):
         if key in attrs:
             settings[key] = np.asarray(attrs[key]).tolist()
+    if method == HSE_POLAR:
+        settings["polar_recipe"] = json.loads(attrs["polar_recipe"])
     if method == "pbe-anchored-v1":
         settings["locality_recipe"] = json.loads(attrs["locality_recipe"])
     if method == "locality_constrained_paw":
