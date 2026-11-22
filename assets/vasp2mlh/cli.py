@@ -205,7 +205,7 @@ def make_parser():
             "--completion-method",
             choices=("auto", "spectral-ritz", "locality-constrained", "pbe-anchored-v1", HSE_POLAR, BOUNDED_COLLINEAR, SCALAR_POLAR, COLLINEAR_POLAR, SPINOR_POLAR, HUBBARD_POLAR),
             default=None,
-            help="The installed major release selects the method from VASP metadata. 1.x uses the original Ritz or joint locality completion. 2.x anchors the polar target frame, separately for collinear channels and jointly for spinors. Screened HSE uses a matched PBE reference. Use band_range for a fixed ordered target.",
+            help="The maintained 2.x Polar series selects the target frame from VASP metadata, separately for collinear channels and jointly for spinors. Screened HSE uses a matched PBE reference. Use band_range for a fixed ordered target. Historical original-family runs can be reproduced with tag v1.0.1.",
         )
         operation.add_argument(
             "--centre-offset",

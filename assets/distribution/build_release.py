@@ -15,6 +15,8 @@ from vasp2mlh.basis import radial_backend
 
 
 def main():
+    if __version__.split(".")[0] != "2":
+        raise SystemExit("main builds the 2.x Polar release series. Use the original tag for historical builds.")
     if sys.platform != "linux" or platform.machine() != "x86_64":
         raise SystemExit("This release target requires Linux x86_64")
     if radial_backend() != "cython":
